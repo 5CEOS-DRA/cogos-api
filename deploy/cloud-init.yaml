@@ -1,0 +1,142 @@
+#cloud-config
+# cogos-api VM bootstrap.
+# Runs once at first boot. Output streams to /var/log/cloud-init-output.log
+# (which provision.sh tails to your terminal).
+
+package_update: true
+package_upgrade: false
+
+packages:
+  - curl
+  - jq
+  - git
+  - ca-certificates
+  - debian-keyring
+  - debian-archive-keyring
+  - apt-transport-https
+
+write_files:
+  # System unit for cogos-api
+  - path: /etc/systemd/system/cogos-api.service
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=cogos-api — OpenAI-compatible gateway
+      After=network.target ollama.service
+      Wants=ollama.service
+
+      [Service]
+      Type=simple
+      WorkingDirectory=/opt/cogos-api
+      EnvironmentFile=/opt/cogos-api/.env
+      ExecStart=/usr/bin/node /opt/cogos-api/src/index.js
+      Restart=on-failure
+      RestartSec=5
+      StandardOutput=append:/var/log/cogos-api.log
+      StandardError=append:/var/log/cogos-api.log
+      User=cogos
+
+      [Install]
+      WantedBy=multi-user.target
+
+  # Caddyfile — automatic HTTPS, reverse-proxies to cogos-api on :4444
+  - path: /etc/caddy/Caddyfile
+    permissions: '0644'
+    content: |
+      # Public hostname is set by provision.sh at deploy time.
+      # Caddy gets a Let's Encrypt cert automatically on first request.
+      {$COGOS_PUBLIC_FQDN} {
+        reverse_proxy 127.0.0.1:4444
+        encode gzip
+        log {
+          output file /var/log/caddy/access.log
+        }
+      }
+
+  # Main bootstrap script — invoked by runcmd below
+  - path: /opt/cogos/bootstrap.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      set -euxo pipefail
+      exec > >(tee -a /var/log/cogos-bootstrap.log) 2>&1
+
+      echo "[$(date -u +%FT%TZ)] === cogos-api bootstrap starting ==="
+
+      # Create cogos system user
+      id cogos &>/dev/null || useradd --system --create-home --shell /bin/bash cogos
+      mkdir -p /opt/cogos-api /var/lib/cogos-api /var/log/caddy
+      chown -R cogos:cogos /opt/cogos-api /var/lib/cogos-api
+
+      # Install Node 20 via NodeSource
+      curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+      apt-get install -y nodejs
+
+      # Install Caddy 2 (apt repo)
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+      curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+      apt-get update
+      apt-get install -y caddy
+
+      # Install Azure CLI for managed-identity secret retrieval
+      curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+
+      # Install Ollama
+      curl -fsSL https://ollama.com/install.sh | sh
+      systemctl enable ollama
+      systemctl start ollama
+      sleep 8
+
+      # Pull CogOS-tier models (Tier B + Tier A)
+      sudo -u ollama ollama pull qwen2.5:3b-instruct
+      sudo -u ollama ollama pull qwen2.5:7b-instruct
+      echo "[$(date -u +%FT%TZ)] === models pulled ==="
+
+      # Pull secrets from Key Vault via managed identity
+      az login --identity --output none
+      KV_NAME="${KV_NAME}"  # substituted via cloud-init template vars
+      JWT_SECRET=$(az keyvault secret show --vault-name "$KV_NAME" --name jwt-secret --query value -o tsv)
+      ADMIN_KEY=$(az keyvault secret show --vault-name "$KV_NAME" --name cogos-admin-key --query value -o tsv)
+      GH_TOKEN=$(az keyvault secret show --vault-name "$KV_NAME" --name github-token --query value -o tsv)
+
+      # Clone cogos-api repo (private — use PAT from KV)
+      sudo -u cogos git clone "https://oauth2:${GH_TOKEN}@github.com/5CEOS-DRA/cogos-api.git" /opt/cogos-api
+      cd /opt/cogos-api
+      sudo -u cogos npm ci --omit=dev
+
+      # Write .env from secrets — never echoed
+      cat > /opt/cogos-api/.env <<EOF
+      PORT=4444
+      OLLAMA_URL=http://localhost:11434
+      DEFAULT_MODEL=qwen2.5:3b-instruct
+      ADMIN_KEY=${ADMIN_KEY}
+      JWT_SECRET=${JWT_SECRET}
+      INFERENCE_TIMEOUT_MS=60000
+      LOG_LEVEL=info
+      KEYS_FILE=/var/lib/cogos-api/keys.json
+      USAGE_FILE=/var/lib/cogos-api/usage.jsonl
+      EOF
+      chmod 600 /opt/cogos-api/.env
+      chown cogos:cogos /opt/cogos-api/.env
+
+      # Set the public FQDN env var for Caddy
+      mkdir -p /etc/systemd/system/caddy.service.d
+      cat > /etc/systemd/system/caddy.service.d/cogos-env.conf <<EOF
+      [Service]
+      Environment="COGOS_PUBLIC_FQDN=${PUBLIC_FQDN}"
+      EOF
+
+      # Start services
+      systemctl daemon-reload
+      systemctl enable cogos-api caddy
+      systemctl start cogos-api
+      systemctl restart caddy
+
+      echo "[$(date -u +%FT%TZ)] === bootstrap complete ==="
+      echo "[$(date -u +%FT%TZ)] cogos-api: $(systemctl is-active cogos-api)"
+      echo "[$(date -u +%FT%TZ)] caddy:     $(systemctl is-active caddy)"
+      echo "[$(date -u +%FT%TZ)] ollama:    $(systemctl is-active ollama)"
+      curl -sS http://localhost:4444/health || echo "WARN: local health check failed"
+
+runcmd:
+  - bash /opt/cogos/bootstrap.sh

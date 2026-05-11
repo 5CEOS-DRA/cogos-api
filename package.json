@@ -1,0 +1,27 @@
+{
+  "name": "cogos-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CogOS — OpenAI-compatible API gateway for deterministic, schema-locked local inference",
+  "main": "src/index.js",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node src/index.js",
+    "test": "jest"
+  },
+  "jest": {
+    "testEnvironment": "node",
+    "verbose": true
+  },
+  "dependencies": {
+    "axios": "^1.16.0",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "winston": "^3.19.0"
+  },
+  "devDependencies": {
+    "jest": "^30.4.2",
+    "nock": "^14.0.15",
+    "supertest": "^7.2.2"
+  }
+}

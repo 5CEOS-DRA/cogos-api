@@ -42,7 +42,8 @@ function newKeyPlaintext() {
 }
 
 // Issue a new API key for a tenant. Returns the plaintext (show once).
-function issue({ tenantId, label = '', tier = 'starter' } = {}) {
+// `stripe` is optional metadata: { customer_id, subscription_id, status, email }
+function issue({ tenantId, label = '', tier = 'starter', stripe = null } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   const plaintext = newKeyPlaintext();
   const record = {
@@ -55,11 +56,40 @@ function issue({ tenantId, label = '', tier = 'starter' } = {}) {
     active: true,
     issued_at: new Date().toISOString(),
     last_used_at: null,
+    stripe_customer_id: (stripe && stripe.customer_id) || null,
+    stripe_subscription_id: (stripe && stripe.subscription_id) || null,
+    stripe_subscription_status: (stripe && stripe.status) || null,
+    customer_email: (stripe && stripe.email) || null,
   };
   const records = readAll();
   records.push(record);
   writeAll(records);
   return { plaintext, record: { ...record, key_hash: undefined } };
+}
+
+// Find an existing record by Stripe customer ID (used by webhook handlers to
+// update subscription status / revoke on cancellation).
+function findByStripeCustomer(stripeCustomerId) {
+  if (!stripeCustomerId) return null;
+  const records = readAll();
+  const found = records.find((r) => r.stripe_customer_id === stripeCustomerId && r.active);
+  if (!found) return null;
+  return { ...found, key_hash: undefined };
+}
+
+// Update an existing record's Stripe metadata + optionally toggle active.
+function updateStripeStatus(keyId, { status, active }) {
+  const records = readAll();
+  const r = records.find((x) => x.id === keyId);
+  if (!r) return false;
+  if (status !== undefined) r.stripe_subscription_status = status;
+  if (active !== undefined) {
+    r.active = active;
+    if (!active) r.revoked_at = new Date().toISOString();
+  }
+  r.stripe_updated_at = new Date().toISOString();
+  writeAll(records);
+  return true;
 }
 
 // Verify a presented bearer string. Returns the record if valid+active.
@@ -91,4 +121,4 @@ function revoke(id) {
   return true;
 }
 
-module.exports = { issue, verify, list, revoke, PREFIX };
+module.exports = { issue, verify, list, revoke, findByStripeCustomer, updateStripeStatus, PREFIX };

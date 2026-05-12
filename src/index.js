@@ -8,15 +8,83 @@ const { bearerAuth, adminAuth } = require('./auth');
 const { handleChatCompletions, handleListModels } = require('./openai-compat');
 const keys = require('./keys');
 const usage = require('./usage');
+const stripeMod = require('./stripe');
+const landing = require('./landing');
 
 function createApp() {
   const app = express();
+
+  // Stripe webhook NEEDS raw body for signature verification. Mount BEFORE
+  // express.json() so the body parser doesn't consume the stream first.
+  app.post('/stripe/webhook',
+    express.raw({ type: 'application/json', limit: '512kb' }),
+    async (req, res) => {
+      const sig = req.headers['stripe-signature'];
+      let event;
+      try {
+        event = stripeMod.verifyAndParseEvent(req.body, sig);
+      } catch (e) {
+        logger.warn('stripe_webhook_signature_invalid', { error: e.message });
+        return res.status(400).send(`Webhook signature error: ${e.message}`);
+      }
+      if (stripeMod.isEventProcessed(event.id)) {
+        logger.info('stripe_webhook_duplicate', { event_id: event.id, type: event.type });
+        return res.json({ received: true, duplicate: true });
+      }
+      try {
+        if (event.type === 'checkout.session.completed') {
+          await stripeMod.handleCheckoutCompleted(event);
+        } else if (event.type === 'customer.subscription.updated'
+                || event.type === 'customer.subscription.deleted') {
+          await stripeMod.handleSubscriptionUpdated(event);
+        } else {
+          logger.info('stripe_webhook_unhandled', { event_id: event.id, type: event.type });
+        }
+        res.json({ received: true });
+      } catch (e) {
+        logger.error('stripe_webhook_handler_failed', { event_id: event.id, type: event.type, error: e.message });
+        res.status(500).json({ error: e.message });
+      }
+    });
+
+  // All other endpoints use parsed JSON.
   app.use(express.json({ limit: '512kb' }));
   app.set('trust proxy', 1);
 
   // ---- Public health (no auth) ----
   app.get('/health', (_req, res) => {
     res.json({ status: 'ok', service: 'cogos-api', version: '0.1.0' });
+  });
+
+  // ---- Public landing + signup + success/cancel ----
+  app.get('/', (_req, res) => res.type('html').send(landing.LANDING_HTML));
+  app.get('/cancel', (_req, res) => res.type('html').send(landing.CANCEL_HTML));
+
+  app.post('/signup', async (req, res) => {
+    try {
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      const origin = `${proto}://${host}`;
+      const session = await stripeMod.createCheckoutSession({ origin });
+      logger.info('stripe_checkout_session_created', { session_id: session.id });
+      // Redirect to Stripe-hosted checkout page
+      res.redirect(303, session.url);
+    } catch (e) {
+      logger.error('stripe_checkout_create_failed', { error: e.message });
+      res.status(500).send(`Could not start checkout: ${e.message}`);
+    }
+  });
+
+  app.get('/success', (req, res) => {
+    const sessionId = req.query.session_id;
+    if (!sessionId) return res.status(400).send('Missing session_id');
+    const issued = stripeMod.getNewlyIssuedKey(sessionId);
+    // If webhook hasn't fired yet (race on checkout completion), issued is null.
+    res.type('html').send(landing.successHtml({
+      apiKey: issued ? issued.api_key : null,
+      keyId: issued ? issued.key_id : null,
+      expiresAt: issued ? issued.expires_at : null,
+    }));
   });
 
   // ---- OpenAI-compatible surface ----

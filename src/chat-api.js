@@ -22,6 +22,7 @@ const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('./logger');
 const usage = require('./usage');
+const packages = require('./packages');
 
 const UPSTREAM_PROVIDER = () => (process.env.UPSTREAM_PROVIDER || 'ollama').toLowerCase();
 const UPSTREAM_URL = () =>
@@ -41,6 +42,90 @@ function resolveModel(requested) {
   if (!requested) return DEFAULT_MODEL();
   const tiers = TIER_TO_MODEL();
   return tiers[requested] || requested;
+}
+
+// Count requests this customer has made in the current billing cycle
+// (calendar month, UTC). Linear scan of usage.jsonl is fine while
+// volumes are modest; swap for a counter file or external store
+// once a single tenant routinely makes >100K calls/mo.
+function countCurrentCycleRequests(keyId) {
+  if (!keyId) return 0;
+  const cycleStartMs = Date.parse(packages.currentBillingCycleStart());
+  let n = 0;
+  for (const u of usage.readAll()) {
+    if (u.key_id !== keyId) continue;
+    if (u.status !== 'success') continue;
+    const ts = Date.parse(u.ts);
+    if (Number.isFinite(ts) && ts >= cycleStartMs) n += 1;
+  }
+  return n;
+}
+
+// Enforce package quota + tier allowlist BEFORE forwarding upstream.
+// Runs after bearerAuth (which populates req.apiKey).
+function enforcePackage(req, res, next) {
+  const apiKey = req.apiKey;
+  if (!apiKey) {
+    return res.status(401).json({
+      error: { message: 'Unauthorized', type: 'invalid_api_key' },
+    });
+  }
+
+  // Find the package that applies to this key. If no packages exist at
+  // all (unseeded fresh deploy), allow the call but log a warning — the
+  // operator hasn't finished setup.
+  const pkg = packages.resolveForKey(apiKey);
+  if (!pkg) {
+    logger.warn('enforce_package_no_packages_configured', { key_id: apiKey.id });
+    return next();
+  }
+
+  // Tier allowlist: if the customer requested a known tier alias and
+  // the package doesn't grant it, refuse with 403. Raw model identifiers
+  // pass through (operators issue keys with raw-model latitude knowingly).
+  const requested = (req.body && req.body.model) || null;
+  if (requested && /^cogos-tier-[a-z]$/.test(requested)) {
+    if (!pkg.allowed_model_tiers.includes(requested)) {
+      logger.info('enforce_package_tier_denied', {
+        key_id: apiKey.id, package_id: pkg.id, requested,
+      });
+      return res.status(403).json({
+        error: {
+          message: `Model "${requested}" is not included in package "${pkg.display_name}". Available tiers: ${pkg.allowed_model_tiers.join(', ')}.`,
+          type: 'model_tier_denied',
+          package_id: pkg.id,
+        },
+      });
+    }
+  }
+
+  // Quota: 0 disables enforcement (unlimited package).
+  if (pkg.monthly_request_quota > 0) {
+    const used = countCurrentCycleRequests(apiKey.id);
+    const remaining = Math.max(0, pkg.monthly_request_quota - used);
+    res.set('X-Cogos-Quota-Limit', String(pkg.monthly_request_quota));
+    res.set('X-Cogos-Quota-Remaining', String(remaining));
+    res.set('X-Cogos-Quota-Reset', packages.nextBillingCycleStart());
+    if (remaining <= 0) {
+      logger.info('enforce_package_quota_exceeded', {
+        key_id: apiKey.id, package_id: pkg.id, used, limit: pkg.monthly_request_quota,
+      });
+      return res.status(429).json({
+        error: {
+          message: `Monthly request quota exceeded for package "${pkg.display_name}" (${used} / ${pkg.monthly_request_quota}). Resets ${packages.nextBillingCycleStart()}.`,
+          type: 'quota_exceeded',
+          package_id: pkg.id,
+          limit: pkg.monthly_request_quota,
+          used,
+          reset: packages.nextBillingCycleStart(),
+        },
+      });
+    }
+  }
+
+  // Stash the package on the request so the handler can record it.
+  req.cogosPackage = pkg;
+  next();
 }
 
 function extractSchema(responseFormat) {
@@ -254,8 +339,9 @@ async function handleListModels(_req, res) {
 module.exports = {
   handleChatCompletions,
   handleListModels,
+  enforcePackage,
   resolveModel,
   TIER_TO_MODEL,
   // exported for tests
-  _internal: { callOllama, callOpenAI, extractSchema },
+  _internal: { callOllama, callOpenAI, extractSchema, countCurrentCycleRequests },
 };

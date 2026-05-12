@@ -16,15 +16,27 @@ jest.mock('stripe', () => {
     url: 'https://checkout.stripe.com/c/pay/cs_test_mocked_abc',
     object: 'checkout.session',
   }));
+  // Products + Prices used by packages.js Stripe sync. Idempotent stubs.
+  const mockProductCreate = jest.fn(async (p) => ({
+    id: 'prod_test_' + p.metadata.cogos_package_id, ...p,
+  }));
+  const mockProductUpdate = jest.fn(async (id, p) => ({ id, ...p }));
+  const mockPriceCreate = jest.fn(async (p) => ({
+    id: 'price_test_' + p.metadata.cogos_package_id + '_' + p.unit_amount, ...p,
+  }));
+  const mockPriceUpdate = jest.fn(async (id, p) => ({ id, ...p }));
   const factory = function (_key, _opts) {
-    // Instance must also expose .webhooks for signature verification calls.
     return {
       checkout: { sessions: { create: mockCreate } },
+      products: { create: mockProductCreate, update: mockProductUpdate },
+      prices: { create: mockPriceCreate, update: mockPriceUpdate },
       webhooks: real.webhooks,
     };
   };
-  factory.webhooks = real.webhooks; // keep static module access too
-  factory.__mockCreate = mockCreate; // expose for assertions
+  factory.webhooks = real.webhooks;
+  factory.__mockCreate = mockCreate;
+  factory.__mockProductCreate = mockProductCreate;
+  factory.__mockPriceCreate = mockPriceCreate;
   return factory;
 });
 
@@ -37,6 +49,7 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-stripe-test-'));
 process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
 process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
 process.env.STRIPE_EVENTS_FILE = path.join(tmpDir, 'stripe-events.json');
+process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
 process.env.OLLAMA_URL = 'http://ollama.test';
 
 const request = require('supertest');
@@ -57,6 +70,16 @@ afterAll(() => {
 
 function buildApp() { return createApp(); }
 
+// Seed the default package once before suites that depend on it.
+// (createApp() doesn't auto-seed in tests; seedIfEmpty is wired only into
+// the live listen() path so unit tests can control state explicitly.)
+async function seedDefaultPackage() {
+  const packages = require('../src/packages');
+  if (packages.list().length === 0) {
+    await packages.seedIfEmpty();
+  }
+}
+
 // Stripe library exposes a helper to construct a properly-signed webhook header.
 function signedWebhook(payloadObj) {
   const payload = JSON.stringify(payloadObj);
@@ -69,12 +92,18 @@ function signedWebhook(payloadObj) {
 
 // ===========================================================================
 describe('public landing + cancel pages', () => {
-  test('GET / renders the landing page', async () => {
+  beforeAll(async () => {
+    await seedDefaultPackage();
+  });
+
+  test('GET / renders the landing page with seeded package', async () => {
     const res = await request(buildApp()).get('/');
     expect(res.status).toBe(200);
     expect(res.text).toMatch(/CogOS/);
     expect(res.text).toMatch(/\$25\/mo/);
-    expect(res.text).toMatch(/<form action="\/signup"/);
+    // Signup form now carries the package id as a query param so the
+    // server-side handler knows which package to bill.
+    expect(res.text).toMatch(/<form action="\/signup\?package=starter"/);
   });
 
   test('GET /cancel renders the cancel page', async () => {
@@ -86,27 +115,40 @@ describe('public landing + cancel pages', () => {
 
 // ===========================================================================
 describe('POST /signup creates Stripe Checkout Session', () => {
+  beforeAll(async () => {
+    await seedDefaultPackage();
+  });
+
   test('happy path → 303 redirect to Stripe-hosted URL', async () => {
     const res = await request(buildApp()).post('/signup');
     expect(res.status).toBe(303);
     expect(res.headers.location).toMatch(/checkout\.stripe\.com/);
+    // STRIPE_SECRET_KEY is set in this test file → live-mode mocks run.
+    // The mocked stripe.prices.create returns price_test_<pkg>_<cents>.
     expect(Stripe.__mockCreate).toHaveBeenCalledWith(
       expect.objectContaining({
         mode: 'subscription',
         line_items: expect.arrayContaining([
-          expect.objectContaining({ price: 'price_FAKE_TEST_PRICE', quantity: 1 }),
+          expect.objectContaining({ price: 'price_test_starter_2500', quantity: 1 }),
         ]),
+        metadata: expect.objectContaining({
+          cogos_package_id: 'starter',
+        }),
       }),
     );
   });
 
-  test('STRIPE_PRICE_ID missing → 500 with error message', async () => {
-    const saved = process.env.STRIPE_PRICE_ID;
-    delete process.env.STRIPE_PRICE_ID;
-    const res = await request(buildApp()).post('/signup');
+  test('no packages configured → 500 with explanatory message', async () => {
+    // Wipe packages.json so the registry is empty for this test.
+    const fs = require('fs');
+    try { fs.unlinkSync(process.env.PACKAGES_FILE); } catch (_e) {}
+    jest.resetModules();
+    const { createApp: freshCreateApp } = require('../src/index');
+    const res = await request(freshCreateApp()).post('/signup');
     expect(res.status).toBe(500);
-    expect(res.text).toMatch(/STRIPE_PRICE_ID/);
-    process.env.STRIPE_PRICE_ID = saved;
+    expect(res.text).toMatch(/No packages configured/);
+    // Restore default for downstream tests
+    await seedDefaultPackage();
   });
 });
 

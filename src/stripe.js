@@ -19,6 +19,7 @@ const path = require('path');
 
 const logger = require('./logger');
 const keys = require('./keys');
+const packages = require('./packages');
 
 const EVENTS_FILE = process.env.STRIPE_EVENTS_FILE
   || path.join(__dirname, '..', 'data', 'stripe-events.json');
@@ -65,19 +66,36 @@ function findKeyBySession(sessionId) {
 // ---------------------------------------------------------------------------
 // /signup — create a Stripe Checkout Session
 // ---------------------------------------------------------------------------
-async function createCheckoutSession({ origin }) {
-  const priceId = process.env.STRIPE_PRICE_ID;
-  if (!priceId) throw new Error('STRIPE_PRICE_ID not set');
+// Selects which package to sell:
+//   1. Explicit packageId param (e.g. /signup?package=operator-pro)
+//   2. The package whose stripe_price_id matches STRIPE_PRICE_ID env (legacy)
+//   3. The default package
+// The chosen package's stripe_price_id is what Stripe charges; its id is
+// stored in session.metadata so the webhook can issue a key bound to it.
+async function createCheckoutSession({ origin, packageId = null }) {
+  let pkg = null;
+  if (packageId) pkg = packages.get(packageId);
+  if (!pkg && process.env.STRIPE_PRICE_ID) {
+    pkg = packages.findByStripePriceId(process.env.STRIPE_PRICE_ID);
+  }
+  if (!pkg) pkg = packages.getDefault();
+  if (!pkg) throw new Error('No packages configured — visit /admin/packages first');
+  if (!pkg.stripe_price_id) throw new Error(`Package "${pkg.id}" has no stripe_price_id (Stripe sync not yet run)`);
+
   const session = await getStripe().checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
-    line_items: [{ price: priceId, quantity: 1 }],
+    line_items: [{ price: pkg.stripe_price_id, quantity: 1 }],
     success_url: `${origin}/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${origin}/cancel`,
     allow_promotion_codes: true,
     billing_address_collection: 'auto',
     customer_creation: 'always',
-    metadata: { product: 'cogos-api', tier: 'starter' },
+    metadata: {
+      product: 'cogos-api',
+      cogos_package_id: pkg.id,
+      tier: pkg.id, // legacy field; kept for back-compat with admin/usage UIs
+    },
   });
   return session;
 }
@@ -102,10 +120,16 @@ async function handleCheckoutCompleted(event) {
     || null;
   const tenantId = customerId; // use Stripe customer ID as tenant ID — stable, unique
 
+  // Pull the package id off the session metadata (set in createCheckoutSession).
+  // Fall back to default package if unset (legacy session or admin-created).
+  const packageId = (session.metadata && session.metadata.cogos_package_id) || null;
+  const pkg = packageId ? packages.get(packageId) : packages.getDefault();
+
   const { plaintext, record } = keys.issue({
     tenantId,
     label: 'self-serve via Stripe',
-    tier: 'starter',
+    tier: (pkg && pkg.id) || 'starter',
+    package_id: pkg ? pkg.id : null,
     stripe: {
       customer_id: customerId,
       subscription_id: subscriptionId,

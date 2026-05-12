@@ -5,10 +5,11 @@ const express = require('express');
 
 const logger = require('./logger');
 const { bearerAuth, adminAuth } = require('./auth');
-const { handleChatCompletions, handleListModels } = require('./chat-api');
+const { handleChatCompletions, handleListModels, enforcePackage } = require('./chat-api');
 const keys = require('./keys');
 const usage = require('./usage');
 const stripeMod = require('./stripe');
+const packages = require('./packages');
 const landing = require('./landing');
 
 function createApp() {
@@ -57,7 +58,9 @@ function createApp() {
   });
 
   // ---- Public landing + signup + success/cancel ----
-  app.get('/', (_req, res) => res.type('html').send(landing.LANDING_HTML));
+  app.get('/', (_req, res) => {
+    res.type('html').send(landing.renderLandingHtml(packages.list()));
+  });
   app.get('/cancel', (_req, res) => res.type('html').send(landing.CANCEL_HTML));
 
   app.post('/signup', async (req, res) => {
@@ -65,8 +68,13 @@ function createApp() {
       const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
       const host = req.headers['x-forwarded-host'] || req.headers.host;
       const origin = `${proto}://${host}`;
-      const session = await stripeMod.createCheckoutSession({ origin });
-      logger.info('stripe_checkout_session_created', { session_id: session.id });
+      const packageId = (req.query && req.query.package)
+        || (req.body && req.body.package)
+        || null;
+      const session = await stripeMod.createCheckoutSession({ origin, packageId });
+      logger.info('stripe_checkout_session_created', {
+        session_id: session.id, package_id: packageId,
+      });
       // Redirect to Stripe-hosted checkout page
       res.redirect(303, session.url);
     } catch (e) {
@@ -89,7 +97,7 @@ function createApp() {
 
   // ---- Public chat-completions surface ----
   app.get('/v1/models', bearerAuth, handleListModels);
-  app.post('/v1/chat/completions', bearerAuth, handleChatCompletions);
+  app.post('/v1/chat/completions', bearerAuth, enforcePackage, handleChatCompletions);
 
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
   app.post('/admin/keys', adminAuth, (req, res) => {
@@ -133,6 +141,59 @@ function createApp() {
       filtered_count: filtered.length,
       server_time_ms: Date.now(),
     });
+  });
+
+  // ---- Admin: package CRUD (X-Admin-Key, used by Management Console) ----
+  // Packages define what each subscription tier gets: monthly USD price,
+  // monthly request quota, allowed model tiers. Stripe Products + Prices
+  // are kept in sync when STRIPE_SECRET_KEY is configured; otherwise the
+  // sync is a no-op (stub mode) so the operator can edit packages before
+  // turning on self-serve signup.
+  app.get('/admin/packages', adminAuth, (req, res) => {
+    const includeInactive = req.query.include_inactive === '1';
+    res.json({ packages: packages.list({ includeInactive }) });
+  });
+
+  app.post('/admin/packages', adminAuth, async (req, res) => {
+    try {
+      const pkg = await packages.create(req.body || {});
+      res.status(201).json({ package: pkg });
+    } catch (e) {
+      const status = e.code === 'duplicate_id' ? 409
+        : e.code === 'validation_failed' ? 400 : 500;
+      logger.warn('admin_packages_create_failed', { error: e.message, status });
+      res.status(status).json({
+        error: { message: e.message, type: e.code || 'create_failed', errors: e.errors },
+      });
+    }
+  });
+
+  app.put('/admin/packages/:id', adminAuth, async (req, res) => {
+    try {
+      const pkg = await packages.update(req.params.id, req.body || {});
+      res.json({ package: pkg });
+    } catch (e) {
+      const status = e.code === 'not_found' ? 404
+        : e.code === 'validation_failed' ? 400 : 500;
+      logger.warn('admin_packages_update_failed', { id: req.params.id, error: e.message, status });
+      res.status(status).json({
+        error: { message: e.message, type: e.code || 'update_failed', errors: e.errors },
+      });
+    }
+  });
+
+  app.delete('/admin/packages/:id', adminAuth, async (req, res) => {
+    try {
+      const ok = await packages.softDelete(req.params.id);
+      if (!ok) return res.status(404).json({ error: { message: 'Package not found' } });
+      res.json({ deactivated: true, id: req.params.id });
+    } catch (e) {
+      const status = e.code === 'is_default' ? 409 : 500;
+      logger.warn('admin_packages_delete_failed', { id: req.params.id, error: e.message });
+      res.status(status).json({
+        error: { message: e.message, type: e.code || 'delete_failed' },
+      });
+    }
   });
 
   // Live dashboard — same-origin HTML that polls /admin/usage every 2s.
@@ -259,7 +320,16 @@ const LIVE_DASHBOARD_HTML = `<!DOCTYPE html>
 if (require.main === module) {
   const app = createApp();
   const port = Number(process.env.PORT || 4444);
-  app.listen(port, () => logger.info('cogos_api_listening', { port }));
+  app.listen(port, async () => {
+    logger.info('cogos_api_listening', { port });
+    // Pre-seed the default package so quota enforcement has something to
+    // resolve against on a fresh deploy. Idempotent.
+    try {
+      await packages.seedIfEmpty();
+    } catch (e) {
+      logger.error('package_seed_failed_on_boot', { error: e.message });
+    }
+  });
 }
 
 module.exports = { createApp };

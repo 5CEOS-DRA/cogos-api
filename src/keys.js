@@ -43,7 +43,10 @@ function newKeyPlaintext() {
 
 // Issue a new API key for a tenant. Returns the plaintext (show once).
 // `stripe` is optional metadata: { customer_id, subscription_id, status, email }
-function issue({ tenantId, label = '', tier = 'starter', stripe = null } = {}) {
+// `package_id` (optional) links the key to a package in packages.json for
+// quota + tier enforcement. Falls back to default package at request time
+// if unset (keeps backward compat with pre-packages keys).
+function issue({ tenantId, label = '', tier = 'starter', package_id = null, stripe = null } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   const plaintext = newKeyPlaintext();
   const record = {
@@ -53,6 +56,7 @@ function issue({ tenantId, label = '', tier = 'starter', stripe = null } = {}) {
     tenant_id: tenantId,
     label,
     tier,
+    package_id,
     active: true,
     issued_at: new Date().toISOString(),
     last_used_at: null,

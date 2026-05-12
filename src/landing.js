@@ -2,8 +2,76 @@
 
 // Public landing + success + cancel pages. Pure HTML, served from the
 // gateway itself (no separate static host needed for v1).
+//
+// Pricing pills + the at-the-limit FAQ are rendered from the live
+// packages.json registry — change a package in the Management Console
+// and the landing page reflects it on next request, no HTML edit.
 
-const LANDING_HTML = `<!DOCTYPE html>
+function tierLabel(tierId) {
+  // 'cogos-tier-a' → 'Tier A', etc.
+  const m = /^cogos-tier-([a-z])$/.exec(tierId);
+  return m ? `Tier ${m[1].toUpperCase()}` : tierId;
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
+}
+
+function renderPricingPill(pkg) {
+  const tiers = (pkg.allowed_model_tiers || []).map(tierLabel).join(' + ');
+  const quota = (pkg.monthly_request_quota || 0).toLocaleString('en-US');
+  const desc = pkg.description ? escapeHtml(pkg.description) : '';
+  const priceLabel = pkg.monthly_usd === 0
+    ? 'Free'
+    : `$${Number(pkg.monthly_usd).toLocaleString('en-US')}/mo`;
+  return `
+  <div class="pill">
+    <div class="head">${escapeHtml(pkg.display_name)}</div>
+    <div class="price">${priceLabel}</div>
+    <div class="price-sub">${quota.toLowerCase() === '0' ? 'unmetered' : quota + ' requests/mo'} · ${escapeHtml(tiers || '—')} · schema-locked decoding · deterministic at temp=0</div>
+    ${desc ? `<div class="price-sub" style="margin-bottom:14px">${desc}</div>` : ''}
+    <form action="/signup?package=${encodeURIComponent(pkg.id)}" method="POST" style="margin:0">
+      <button class="cta" type="submit">Start →</button>
+    </form>
+  </div>`;
+}
+
+function renderPricingSection(packages) {
+  if (!packages || packages.length === 0) {
+    return `
+  <div class="pill">
+    <div class="head">Pricing — setup pending</div>
+    <div class="price-sub">No packages configured yet. The operator will set these from the Management Console.</div>
+  </div>`;
+  }
+  return packages
+    .sort((a, b) => (a.monthly_usd || 0) - (b.monthly_usd || 0))
+    .map(renderPricingPill)
+    .join('\n');
+}
+
+function renderAtLimitFaq(packages) {
+  const list = (packages || []).filter((p) => p.active !== false);
+  if (list.length <= 1) {
+    return `
+  <div class="pill">
+    <div class="head">What happens at your monthly quota?</div>
+    A clean <code>429</code> with <code>X-Cogos-Quota-Reset</code> pointing at the start of the next billing cycle. Plans aren't lottery tickets — you know what you're getting.
+  </div>`;
+  }
+  return `
+  <div class="pill">
+    <div class="head">What happens at your monthly quota?</div>
+    A clean <code>429</code> with <code>X-Cogos-Quota-Reset</code> pointing at the start of the next billing cycle. Upgrade to a higher-quota package or wait for next cycle. Plans aren't lottery tickets — you know what you're getting.
+  </div>`;
+}
+
+function renderLandingHtml(packages = []) {
+  const PRICING_HTML = renderPricingSection(packages);
+  const AT_LIMIT_FAQ_HTML = renderAtLimitFaq(packages);
+  return `<!DOCTYPE html>
 <html>
 <head>
   <title>CogOS — the cognition substrate for production AI</title>
@@ -107,15 +175,7 @@ const LANDING_HTML = `<!DOCTYPE html>
   </div>
 
   <h2>Pricing</h2>
-
-  <div class="pill">
-    <div class="head">Operator Starter</div>
-    <div class="price">$25/mo</div>
-    <div class="price-sub">100,000 requests · schema-locked decoding · deterministic at temp=0 · no per-minute rate limit</div>
-    <form action="/signup" method="POST" style="margin:0">
-      <button class="cta" type="submit">Start →</button>
-    </form>
-  </div>
+${PRICING_HTML}
 
   <h2>Try it in 30 seconds (after signup)</h2>
 
@@ -154,10 +214,7 @@ const LANDING_HTML = `<!DOCTYPE html>
     Qwen 2.5 (3B and 7B) today. Open-weight, content-addressed. New tiers (Llama 3.3, Mistral) land as discrete versioned upgrades — no silent swaps. The bench is re-run against the live inference path so any drift is published, not hidden.
   </div>
 
-  <div class="pill">
-    <div class="head">What happens at the 100k limit?</div>
-    A clean <code>429</code> with <code>X-Cogos-Rate-Limit-Reset</code>. Upgrade to <em>Operator Pro</em> ($99/mo, 1M req + Tier-A) or wait for next cycle. Plans aren't lottery tickets — you know what you're getting.
-  </div>
+${AT_LIMIT_FAQ_HTML}
 
   <footer>
     Built by 5CEOS · <a href="https://5ceos-dra.github.io">blog</a> ·
@@ -167,6 +224,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 </main>
 </body>
 </html>`;
+}
 
 function successHtml({ apiKey, keyId, expiresAt }) {
   const keyBlock = apiKey
@@ -220,4 +278,4 @@ main{max-width:480px;margin:0 auto}h1{color:#f85149}a{color:#58a6ff}
 <a class="cta" href="/">← Back to home</a>
 </main></body></html>`;
 
-module.exports = { LANDING_HTML, successHtml, CANCEL_HTML };
+module.exports = { renderLandingHtml, successHtml, CANCEL_HTML };

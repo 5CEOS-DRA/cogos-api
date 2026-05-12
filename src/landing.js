@@ -36,7 +36,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 <body>
 <main>
   <h1>CogOS</h1>
-  <div class="tag">A cognition substrate that turns commodity language models into <em>production-grade infrastructure</em>. Deterministic outputs, schema-locked decoding, no rate limit anxiety, no silent model drift.</div>
+  <div class="tag">A <strong>deterministic uptime loop</strong> for production AI. Same call → same bytes out. Same call next month → same bytes out. Same call under load → no rate limit, no throttle, no provider drift. The mechanism that makes AI-backed features safe to ship.</div>
 
   <div class="live-note">
     🟢 Live now: this gateway is serving real traffic. Hit
@@ -46,7 +46,24 @@ const LANDING_HTML = `<!DOCTYPE html>
     open-source, MIT, run it yourself with any provider's credentials.
   </div>
 
-  <h2>The pain. The fix.</h2>
+  <h2>The mechanism</h2>
+
+  <div class="pill">
+    <div class="head">Deterministic</div>
+    Every call is a closed function: input → bytes out. Schema-locked at the decoder level (the model physically can't emit non-conforming JSON). Model digest pinned, sampling settings pinned, temperature 0 by default. Run the same prompt 20 times, get 20 identical responses. Verifiable via the public bench.
+  </div>
+
+  <div class="pill">
+    <div class="head">Uptime</div>
+    Local inference, no third-party rate limit, no provider snapshot rotation, no ToS surface that can change under you. Your plan's request budget is yours — burst as hard as you need within it. The loop stays up because there's no remote dependency to fail.
+  </div>
+
+  <div class="pill">
+    <div class="head">Loop</div>
+    Request → constrained decode → schema-validated response → provenance event → metered usage. Every step deterministic, every step observable, every step replayable from the hash-chained event log. The substrate isn't an LLM endpoint; it's a loop you can build production code on.
+  </div>
+
+  <h2>What breaks without it</h2>
 
   <table class="pain-fix">
     <tr><th>What breaks in production today</th><th>What CogOS guarantees</th></tr>
@@ -72,11 +89,11 @@ const LANDING_HTML = `<!DOCTYPE html>
     </tr>
   </table>
 
-  <h2>How it works</h2>
+  <h2>How the loop is built</h2>
 
   <div class="pill">
     <div class="head">A runtime, not a model</div>
-    Open-weight models (Qwen, Llama, Mistral) are commodities. CogOS is the runtime layer above them — grammar-constrained decoders, pinned digests, tier routing per task shape, provenance events on every call. Think Linux for cognition: the model is the CPU, CogOS is the OS that makes it operable.
+    Open-weight models (Qwen, Llama, Mistral) are commodities. CogOS is the runtime layer above them — grammar-constrained decoders, pinned digests, tier routing per task shape, provenance events on every call. The model is the CPU. CogOS is the OS that makes it operable. The loop is what you ship against.
   </div>
 
   <div class="pill">

@@ -1,17 +1,20 @@
 # cogos-api
 
-The public API surface of **CogOS** — a cognition substrate that turns commodity open-weight language models into production-grade infrastructure.
+The public API surface of **CogOS** — a **deterministic uptime loop** for production AI. Same call in, same bytes out, available when you need it.
 
-## What it actually is
+## The mechanism
 
-`cogos-api` is the gateway. Customers POST chat-completions-shape requests to it; under the hood, calls route through Ollama (or any compatible inference engine) with:
+`cogos-api` is the gateway. Customers POST chat-completions-shape requests to it; under the hood, every call traces the same path:
 
-- **Grammar-constrained decoding** — when a JSON Schema is supplied, the decoder physically can't emit non-conforming output
-- **Pinned deterministic settings** — same input, same bytes out, run after run, verifiable
-- **Tier-routed model selection** — task-shape determines model size (GreenOps doctrine)
-- **Provenance-grade usage logging** — every call emits a hash-chain-able event
+1. **Request** — chat-completions-shape, optionally with a JSON Schema
+2. **Constrained decode** — grammar-locked at the token level when a schema is supplied; non-conforming output is impossible, not retried
+3. **Schema-validated response** — bytes emitted match the schema by construction
+4. **Provenance event** — hash-chainable record of model digest, tokens, latency, request ID
+5. **Metered usage** — counted toward your plan's budget, observable via `/admin/live`
 
-The model is interchangeable (Qwen 2.5 today; Llama 3.3 / Mistral as discrete versioned upgrades later). The runtime guarantees are the product.
+Every step is deterministic. Every step is observable. The loop stays up because there's no remote dependency that can rate-limit you, drift its model out from under you, or change its ToS while you sleep.
+
+The model is interchangeable (Qwen 2.5 today; Llama 3.3 / Mistral as discrete versioned upgrades later). **The loop is the product.**
 
 ## Endpoints
 

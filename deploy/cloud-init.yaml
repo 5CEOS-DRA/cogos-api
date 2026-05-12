@@ -21,7 +21,7 @@ write_files:
     permissions: '0644'
     content: |
       [Unit]
-      Description=cogos-api — OpenAI-compatible gateway
+      Description=cogos-api — chat-completions gateway
       After=network.target ollama.service
       Wants=ollama.service
 

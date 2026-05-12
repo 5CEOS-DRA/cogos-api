@@ -5,7 +5,7 @@ const express = require('express');
 
 const logger = require('./logger');
 const { bearerAuth, adminAuth } = require('./auth');
-const { handleChatCompletions, handleListModels } = require('./openai-compat');
+const { handleChatCompletions, handleListModels } = require('./chat-api');
 const keys = require('./keys');
 const usage = require('./usage');
 const stripeMod = require('./stripe');
@@ -87,7 +87,7 @@ function createApp() {
     }));
   });
 
-  // ---- OpenAI-compatible surface ----
+  // ---- Public chat-completions surface ----
   app.get('/v1/models', bearerAuth, handleListModels);
   app.post('/v1/chat/completions', bearerAuth, handleChatCompletions);
 

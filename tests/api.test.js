@@ -17,7 +17,7 @@ process.env.DEFAULT_MODEL = 'qwen2.5:3b-instruct';
 const request = require('supertest');
 const nock = require('nock');
 const { createApp } = require('../src/index');
-const { handleChatCompletions } = require('../src/openai-compat');
+const { handleChatCompletions } = require('../src/chat-api');
 
 beforeAll(() => {
   nock.disableNetConnect();
@@ -120,7 +120,7 @@ describe('bearer auth on /v1/*', () => {
     const app = buildApp();
     const res = await request(app)
       .post('/v1/chat/completions')
-      .set('Authorization', 'Bearer sk-openai-deadbeef')
+      .set('Authorization', 'Bearer sk-wrongprefix-deadbeef')
       .send({});
     expect(res.status).toBe(401);
     expect(res.body.error.type).toBe('invalid_api_key');
@@ -147,10 +147,10 @@ describe('bearer auth on /v1/*', () => {
 });
 
 // =============================================================================
-// /v1/chat/completions — OpenAI-shape responses
+// /v1/chat/completions — chat-completions-shape responses
 // =============================================================================
 describe('chat completions response shape', () => {
-  test('returns OpenAI-compatible body + headers', async () => {
+  test('returns standard chat-completions body + headers', async () => {
     nock('http://ollama.test')
       .post('/api/chat')
       .reply(200, {

@@ -1,11 +1,12 @@
 'use strict';
 
-// OpenAI-compatible chat completions handler.
+// Chat-completions handler — accepts the standard /v1/chat/completions
+// request shape that established SDK clients already speak.
 //
-// Input shape (subset of OpenAI):
+// Input shape (standard chat-completions request):
 //   { model, messages, temperature?, max_tokens?, response_format?, seed?, ... }
 //
-// Output shape (matches OpenAI):
+// Output shape (standard chat-completions response):
 //   { id, object: "chat.completion", created, model, choices[], usage{} }
 //
 // Schema enforcement: if response_format.type === 'json_schema', we pass
@@ -112,7 +113,7 @@ async function handleChatCompletions(req, res) {
   const promptTokens = data.prompt_eval_count || 0;
   const completionTokens = data.eval_count || 0;
 
-  // Set OpenAI-style usage headers so clients can do their own accounting
+  // Set standard usage headers so clients can do their own accounting
   // without parsing the body. CogOS-specific headers prefixed with X-Cogos-.
   res.set('X-Cogos-Model', model);
   res.set('X-Cogos-Latency-Ms', String(latencyMs));
@@ -146,7 +147,7 @@ async function handleChatCompletions(req, res) {
       completion_tokens: completionTokens,
       total_tokens: promptTokens + completionTokens,
     },
-    // CogOS substrate field — extension, ignored by OpenAI clients
+    // CogOS substrate field — extension, ignored by standard clients
     cogos: {
       schema_enforced: Boolean(schema),
       latency_ms: latencyMs,
@@ -155,7 +156,7 @@ async function handleChatCompletions(req, res) {
   });
 }
 
-// GET /v1/models — OpenAI-compatible model list, drawn from Ollama's tags
+// GET /v1/models — standard model list, drawn from Ollama's tags
 async function handleListModels(_req, res) {
   try {
     const tagsRes = await axios.get(`${OLLAMA_URL()}/api/tags`, { timeout: 10_000 });

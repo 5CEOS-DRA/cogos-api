@@ -2,7 +2,7 @@
   "name": "cogos-api",
   "version": "0.1.0",
   "private": true,
-  "description": "CogOS — OpenAI-compatible API gateway for deterministic, schema-locked local inference",
+  "description": "CogOS — chat-completions gateway for deterministic, schema-locked local inference",
   "main": "src/index.js",
   "engines": {
     "node": ">=18"

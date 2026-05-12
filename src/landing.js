@@ -38,18 +38,34 @@ function renderPricingPill(pkg) {
   </div>`;
 }
 
-function renderPricingSection(packages) {
-  if (!packages || packages.length === 0) {
-    return `
-  <div class="pill">
-    <div class="head">Pricing — setup pending</div>
-    <div class="price-sub">No packages configured yet. The operator will set these from the Management Console.</div>
+// The Enterprise pill is a static, sales-led offering — it is NOT a Stripe
+// package because Enterprise contracts are negotiated (region pinning,
+// dedicated GPU, MSA, SLA add-ons). The number is published on the page
+// for honesty; the CTA opens a sales conversation.
+const ENTERPRISE_PILL_HTML = `
+  <div class="pill" style="border-color:#58a6ff;background:#0d1f33">
+    <div class="head">Enterprise</div>
+    <div class="price">$100,000/yr</div>
+    <div class="price-sub">50M requests/mo · dedicated GPU container · single-tenant · 99.9% SLA · SOC 2 Type II · MSA + DPA + BAA · quarterly business review · 12-month minimum</div>
+    <div class="price-sub" style="margin-bottom:14px">Real deals close at $100K–$250K depending on add-ons (extra GPUs, 99.95% SLA, on-prem deployment, dedicated CSM).</div>
+    <a class="cta" href="mailto:enterprise@5ceos.com?subject=CogOS%20Enterprise%20inquiry">Talk to sales →</a>
   </div>`;
+
+function renderPricingSection(packages) {
+  let pillsHtml;
+  if (!packages || packages.length === 0) {
+    pillsHtml = `
+  <div class="pill">
+    <div class="head">Self-serve tiers — setup pending</div>
+    <div class="price-sub">No self-serve packages configured yet. The operator will set these from the Management Console. Enterprise is always available below.</div>
+  </div>`;
+  } else {
+    pillsHtml = packages
+      .sort((a, b) => (a.monthly_usd || 0) - (b.monthly_usd || 0))
+      .map(renderPricingPill)
+      .join('\n');
   }
-  return packages
-    .sort((a, b) => (a.monthly_usd || 0) - (b.monthly_usd || 0))
-    .map(renderPricingPill)
-    .join('\n');
+  return pillsHtml + ENTERPRISE_PILL_HTML;
 }
 
 function renderAtLimitFaq(packages) {
@@ -219,6 +235,9 @@ ${AT_LIMIT_FAQ_HTML}
   <footer>
     Built by 5CEOS · <a href="https://5ceos-dra.github.io">blog</a> ·
     <a href="https://github.com/5CEOS-DRA/llm-determinism-bench">benchmark</a> ·
+    <a href="/terms">terms</a> ·
+    <a href="/privacy">privacy</a> ·
+    <a href="/aup">acceptable use</a> ·
     determinism by construction, not by hope
   </footer>
 </main>

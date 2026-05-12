@@ -11,6 +11,7 @@ const usage = require('./usage');
 const stripeMod = require('./stripe');
 const packages = require('./packages');
 const landing = require('./landing');
+const legal = require('./legal');
 
 function createApp() {
   const app = express();
@@ -62,6 +63,11 @@ function createApp() {
     res.type('html').send(landing.renderLandingHtml(packages.list()));
   });
   app.get('/cancel', (_req, res) => res.type('html').send(landing.CANCEL_HTML));
+
+  // ---- Legal pages (required for Stripe activation, public, no auth) ----
+  app.get('/terms', (_req, res) => res.type('html').send(legal.termsHtml()));
+  app.get('/privacy', (_req, res) => res.type('html').send(legal.privacyHtml()));
+  app.get('/aup', (_req, res) => res.type('html').send(legal.aupHtml()));
 
   app.post('/signup', async (req, res) => {
     try {

@@ -112,6 +112,16 @@ async function stripeSyncCreate(pkg) {
   return { stripe_product_id: product.id, stripe_price_id: price.id };
 }
 
+// Is this a stub-mode ID (created when Stripe wasn't configured)?
+// A package created in stub mode has prod_stub_<id> / price_stub_<id>_<usd>
+// values that do not exist on Stripe's side, so when we transition to
+// live mode we cannot update them — we must promote the package by
+// running a fresh stripeSyncCreate against the live Stripe API.
+function isStubId(id) {
+  if (!id) return false;
+  return id.startsWith('prod_stub_') || id.startsWith('price_stub_');
+}
+
 // When monthly_usd changes, we cannot edit the existing Stripe Price —
 // we must create a new one and archive the old. Stripe Products are
 // editable in place. Returns the (possibly new) stripe_price_id.
@@ -124,6 +134,14 @@ async function stripeSyncUpdate(oldPkg, newPkg) {
       stripe_product_id: oldPkg.stripe_product_id,
       stripe_price_id: oldPkg.stripe_price_id,
     };
+  }
+  // Stub-mode artifact promotion: if the previous package had stub IDs
+  // (created when STRIPE_SECRET_KEY was unset), treat this update as a
+  // fresh Stripe creation. Bypasses the no-such-product error from
+  // stripe.products.update(prod_stub_...).
+  if (isStubId(oldPkg.stripe_product_id) || isStubId(oldPkg.stripe_price_id)) {
+    logger.info('package_stripe_promote_from_stub', { id: newPkg.id });
+    return stripeSyncCreate(newPkg);
   }
   const stripe = getStripe();
   if (oldPkg.stripe_product_id) {
@@ -162,6 +180,8 @@ async function stripeSyncUpdate(oldPkg, newPkg) {
 async function stripeSyncDeactivate(pkg) {
   if (stripeStubMode()) return;
   if (!pkg.stripe_price_id) return;
+  // Stub IDs don't exist on Stripe — nothing to deactivate.
+  if (isStubId(pkg.stripe_price_id)) return;
   const stripe = getStripe();
   try {
     await stripe.prices.update(pkg.stripe_price_id, { active: false });

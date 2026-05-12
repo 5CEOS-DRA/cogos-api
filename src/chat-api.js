@@ -9,28 +9,38 @@
 // Output shape (standard chat-completions response):
 //   { id, object: "chat.completion", created, model, choices[], usage{} }
 //
-// Schema enforcement: if response_format.type === 'json_schema', we pass
-// the schema through to Ollama's `format` field (Ollama 0.5+ does
-// grammar-constrained decoding). This is the CogOS substrate guarantee.
+// Upstream selection:
+//   UPSTREAM_PROVIDER=ollama  (default) — calls <UPSTREAM_URL>/api/chat
+//   UPSTREAM_PROVIDER=openai            — calls <UPSTREAM_URL>/chat/completions
+//                                         with Bearer <UPSTREAM_API_KEY>
+// Schema enforcement: if response_format.type === 'json_schema', we forward
+// the schema. Ollama 0.5+ uses the `format` field (token-level grammar);
+// OpenAI-compatible providers (Fireworks/Together/DeepInfra) use the
+// `response_format: json_schema` field they already accept.
 
 const crypto = require('crypto');
 const axios = require('axios');
 const logger = require('./logger');
 const usage = require('./usage');
 
-const OLLAMA_URL = () => process.env.OLLAMA_URL || 'http://localhost:11434';
+const UPSTREAM_PROVIDER = () => (process.env.UPSTREAM_PROVIDER || 'ollama').toLowerCase();
+const UPSTREAM_URL = () =>
+  process.env.UPSTREAM_URL || process.env.OLLAMA_URL || 'http://localhost:11434';
+const UPSTREAM_API_KEY = () => process.env.UPSTREAM_API_KEY || '';
 const DEFAULT_MODEL = () => process.env.DEFAULT_MODEL || 'qwen2.5:3b-instruct';
 const TIMEOUT = () => Number(process.env.INFERENCE_TIMEOUT_MS || 60_000);
 
-// Tier aliases — caller can specify a CogOS tier instead of a raw model.
-const TIER_TO_MODEL = {
-  'cogos-tier-b': 'qwen2.5:3b-instruct',
-  'cogos-tier-a': 'qwen2.5:7b-instruct',
-};
+// Tier aliases — caller specifies a CogOS tier; env vars override the
+// concrete model name per upstream provider.
+const TIER_TO_MODEL = () => ({
+  'cogos-tier-b': process.env.UPSTREAM_MODEL_TIER_B || 'qwen2.5:3b-instruct',
+  'cogos-tier-a': process.env.UPSTREAM_MODEL_TIER_A || 'qwen2.5:7b-instruct',
+});
 
 function resolveModel(requested) {
   if (!requested) return DEFAULT_MODEL();
-  return TIER_TO_MODEL[requested] || requested;
+  const tiers = TIER_TO_MODEL();
+  return tiers[requested] || requested;
 }
 
 function extractSchema(responseFormat) {
@@ -39,6 +49,76 @@ function extractSchema(responseFormat) {
   const js = responseFormat.json_schema;
   if (!js || !js.schema) return null;
   return js.schema;
+}
+
+async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed }) {
+  const payload = {
+    model,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    stream: false,
+    options: {
+      temperature,
+      num_predict: typeof max_tokens === 'number' ? max_tokens : -1,
+      seed: typeof seed === 'number' ? seed : undefined,
+    },
+  };
+  if (schema) payload.format = schema;
+  const res = await axios.post(`${url}/api/chat`, payload, {
+    timeout: TIMEOUT(),
+    validateStatus: () => true,
+  });
+  const parsed =
+    res.status >= 200 && res.status < 300
+      ? {
+          content: (res.data && res.data.message && res.data.message.content) || '',
+          prompt_tokens: (res.data && res.data.prompt_eval_count) || 0,
+          completion_tokens: (res.data && res.data.eval_count) || 0,
+          finish_reason: (res.data && res.data.done_reason) || 'stop',
+        }
+      : null;
+  return { status: res.status, data: res.data, parsed };
+}
+
+async function callOpenAI({ url, key, model, messages, schema, temperature, max_tokens, seed }) {
+  const payload = {
+    model,
+    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    temperature,
+    stream: false,
+  };
+  if (typeof max_tokens === 'number' && max_tokens > 0) payload.max_tokens = max_tokens;
+  if (typeof seed === 'number') payload.seed = seed;
+  if (schema) {
+    payload.response_format = {
+      type: 'json_schema',
+      json_schema: { name: 'cogos_output', strict: true, schema },
+    };
+  }
+  const headers = { 'Content-Type': 'application/json' };
+  if (key) headers['Authorization'] = `Bearer ${key}`;
+  const fullUrl = /\/chat\/completions$/.test(url)
+    ? url
+    : `${url.replace(/\/$/, '')}/chat/completions`;
+  const res = await axios.post(fullUrl, payload, {
+    headers,
+    timeout: TIMEOUT(),
+    validateStatus: () => true,
+  });
+  const choice = res.data && res.data.choices && res.data.choices[0];
+  const parsed =
+    res.status >= 200 && res.status < 300
+      ? {
+          content: (choice && choice.message && choice.message.content) || '',
+          prompt_tokens: (res.data && res.data.usage && res.data.usage.prompt_tokens) || 0,
+          completion_tokens: (res.data && res.data.usage && res.data.usage.completion_tokens) || 0,
+          finish_reason: (choice && choice.finish_reason) || 'stop',
+        }
+      : null;
+  return { status: res.status, data: res.data, parsed };
+}
+
+async function callUpstream(args) {
+  return UPSTREAM_PROVIDER() === 'openai' ? callOpenAI(args) : callOllama(args);
 }
 
 async function handleChatCompletions(req, res) {
@@ -54,29 +134,26 @@ async function handleChatCompletions(req, res) {
   const schema = extractSchema(body.response_format);
   const requestId = 'chatcmpl-' + crypto.randomBytes(12).toString('hex');
 
-  // Translate to Ollama /api/chat.
-  const ollamaPayload = {
-    model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
-    stream: false,
-    options: {
-      temperature: typeof body.temperature === 'number' ? body.temperature : 0,
-      num_predict: typeof body.max_tokens === 'number' ? body.max_tokens : -1,
-      seed: typeof body.seed === 'number' ? body.seed : undefined,
-    },
-  };
-  if (schema) ollamaPayload.format = schema;
-
   const start = Date.now();
-  let ollamaRes;
+  let upstream;
   try {
-    ollamaRes = await axios.post(`${OLLAMA_URL()}/api/chat`, ollamaPayload, {
-      timeout: TIMEOUT(),
-      validateStatus: () => true,
+    upstream = await callUpstream({
+      url: UPSTREAM_URL(),
+      key: UPSTREAM_API_KEY(),
+      model,
+      messages,
+      schema,
+      temperature: typeof body.temperature === 'number' ? body.temperature : 0,
+      max_tokens: body.max_tokens,
+      seed: body.seed,
     });
   } catch (e) {
     const latency = Date.now() - start;
-    logger.error('ollama_request_failed', { error: e.message, latency });
+    logger.error('upstream_request_failed', {
+      provider: UPSTREAM_PROVIDER(),
+      error: e.message,
+      latency,
+    });
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,
@@ -92,29 +169,31 @@ async function handleChatCompletions(req, res) {
   }
   const latencyMs = Date.now() - start;
 
-  if (ollamaRes.status < 200 || ollamaRes.status >= 300) {
-    logger.warn('ollama_non_2xx', { status: ollamaRes.status, body: ollamaRes.data });
+  if (!upstream.parsed) {
+    logger.warn('upstream_non_2xx', {
+      provider: UPSTREAM_PROVIDER(),
+      status: upstream.status,
+      body: upstream.data,
+    });
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,
       model,
       latency_ms: latencyMs,
-      status: 'upstream_' + ollamaRes.status,
+      status: 'upstream_' + upstream.status,
       schema_enforced: Boolean(schema),
       request_id: requestId,
     });
     return res.status(502).json({
-      error: { message: 'Inference engine returned ' + ollamaRes.status, type: 'upstream_error' },
+      error: {
+        message: 'Inference engine returned ' + upstream.status,
+        type: 'upstream_error',
+      },
     });
   }
 
-  const data = ollamaRes.data || {};
-  const content = (data.message && data.message.content) || '';
-  const promptTokens = data.prompt_eval_count || 0;
-  const completionTokens = data.eval_count || 0;
+  const { content, prompt_tokens, completion_tokens, finish_reason } = upstream.parsed;
 
-  // Set standard usage headers so clients can do their own accounting
-  // without parsing the body. CogOS-specific headers prefixed with X-Cogos-.
   res.set('X-Cogos-Model', model);
   res.set('X-Cogos-Latency-Ms', String(latencyMs));
   res.set('X-Cogos-Schema-Enforced', schema ? '1' : '0');
@@ -124,8 +203,8 @@ async function handleChatCompletions(req, res) {
     key_id: req.apiKey && req.apiKey.id,
     tenant_id: req.apiKey && req.apiKey.tenant_id,
     model,
-    prompt_tokens: promptTokens,
-    completion_tokens: completionTokens,
+    prompt_tokens,
+    completion_tokens,
     latency_ms: latencyMs,
     status: 'success',
     schema_enforced: Boolean(schema),
@@ -137,17 +216,18 @@ async function handleChatCompletions(req, res) {
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
     model,
-    choices: [{
-      index: 0,
-      message: { role: 'assistant', content },
-      finish_reason: data.done_reason || 'stop',
-    }],
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content },
+        finish_reason,
+      },
+    ],
     usage: {
-      prompt_tokens: promptTokens,
-      completion_tokens: completionTokens,
-      total_tokens: promptTokens + completionTokens,
+      prompt_tokens,
+      completion_tokens,
+      total_tokens: prompt_tokens + completion_tokens,
     },
-    // CogOS substrate field — extension, ignored by standard clients
     cogos: {
       schema_enforced: Boolean(schema),
       latency_ms: latencyMs,
@@ -156,24 +236,26 @@ async function handleChatCompletions(req, res) {
   });
 }
 
-// GET /v1/models — standard model list, drawn from Ollama's tags
 async function handleListModels(_req, res) {
-  try {
-    const tagsRes = await axios.get(`${OLLAMA_URL()}/api/tags`, { timeout: 10_000 });
-    const models = (tagsRes.data && tagsRes.data.models) || [];
-    res.json({
-      object: 'list',
-      data: models.map((m) => ({
-        id: m.name,
-        object: 'model',
-        created: Math.floor(new Date(m.modified_at || Date.now()).getTime() / 1000),
-        owned_by: 'cogos',
-      })),
-    });
-  } catch (e) {
-    logger.error('list_models_failed', { error: e.message });
-    res.status(502).json({ error: { message: 'Cannot reach inference engine' } });
-  }
+  // Customer-facing tier aliases. Honest about what each resolves to.
+  const tiers = TIER_TO_MODEL();
+  const now = Math.floor(Date.now() / 1000);
+  res.json({
+    object: 'list',
+    data: [
+      { id: 'cogos-tier-b', object: 'model', created: now, owned_by: 'cogos',
+        cogos_resolves_to: tiers['cogos-tier-b'] },
+      { id: 'cogos-tier-a', object: 'model', created: now, owned_by: 'cogos',
+        cogos_resolves_to: tiers['cogos-tier-a'] },
+    ],
+  });
 }
 
-module.exports = { handleChatCompletions, handleListModels, resolveModel, TIER_TO_MODEL };
+module.exports = {
+  handleChatCompletions,
+  handleListModels,
+  resolveModel,
+  TIER_TO_MODEL,
+  // exported for tests
+  _internal: { callOllama, callOpenAI, extractSchema },
+};

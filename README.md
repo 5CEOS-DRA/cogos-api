@@ -9,12 +9,12 @@ The public API surface of **CogOS** — a **deterministic uptime loop** for prod
 1. **Request** — chat-completions-shape, optionally with a JSON Schema
 2. **Constrained decode** — grammar-locked at the token level when a schema is supplied; non-conforming output is impossible, not retried
 3. **Schema-validated response** — bytes emitted match the schema by construction
-4. **Provenance event** — hash-chainable record of model digest, tokens, latency, request ID
+4. **Provenance event** — append-only record of upstream model, tokens, latency, request ID
 5. **Metered usage** — counted toward your plan's budget, observable via `/admin/live`
 
-Every step is deterministic. Every step is observable. The loop stays up because there's no remote dependency that can rate-limit you, drift its model out from under you, or change its ToS while you sleep.
+Every step is deterministic by construction; every step is observable; the determinism is **audited** by an open public bench ([`llm-determinism-bench`](https://github.com/5CEOS-DRA/llm-determinism-bench)) that we re-run against the live inference path on a published cadence. Drift shows up in the CSV the same day, in public — no "trust us."
 
-The model is interchangeable (Qwen 2.5 today; Llama 3.3 / Mistral as discrete versioned upgrades later). **The loop is the product.**
+The upstream inference engine is interchangeable. Configure it via env vars (see below) — local Ollama for development, any OpenAI-compatible hosted provider in production. **The loop is the product.**
 
 ## Endpoints
 
@@ -44,9 +44,24 @@ The model is interchangeable (Qwen 2.5 today; Llama 3.3 / Mistral as discrete ve
 
 The `/v1/chat/completions` endpoint accepts the standard chat-completions request shape plus:
 
-- `model: "cogos-tier-b"` resolves to `qwen2.5:3b-instruct` (classification-shaped workloads, per GreenOps doctrine)
-- `model: "cogos-tier-a"` resolves to `qwen2.5:7b-instruct` (narrative)
-- Any raw Ollama model tag also works (e.g. `model: "qwen2.5:7b-instruct"`)
+- `model: "cogos-tier-b"` resolves to the small-model upstream (default `qwen2.5:3b-instruct`; override via `UPSTREAM_MODEL_TIER_B` env) — classification-shaped workloads per GreenOps doctrine
+- `model: "cogos-tier-a"` resolves to the large-model upstream (default `qwen2.5:7b-instruct`; override via `UPSTREAM_MODEL_TIER_A` env) — narrative
+- Any raw model tag your upstream accepts also works (e.g. `model: "qwen2.5:7b-instruct"` on Ollama, or `model: "accounts/fireworks/models/qwen2p5-7b-instruct"` on Fireworks)
+
+## Upstream selection
+
+Environment variables select which inference engine the gateway forwards to:
+
+| Var | Values | Purpose |
+|---|---|---|
+| `UPSTREAM_PROVIDER` | `ollama` (default) \| `openai` | Which protocol to speak upstream |
+| `UPSTREAM_URL` | base URL of the upstream | E.g. `http://localhost:11434` for local Ollama, `https://api.fireworks.ai/inference/v1` for Fireworks, `https://api.together.xyz/v1` for Together |
+| `UPSTREAM_API_KEY` | bearer token | Empty for Ollama; required for hosted providers |
+| `UPSTREAM_MODEL_TIER_A` | model identifier | Override what `cogos-tier-a` resolves to |
+| `UPSTREAM_MODEL_TIER_B` | model identifier | Override what `cogos-tier-b` resolves to |
+| `INFERENCE_TIMEOUT_MS` | integer ms (default 60000) | Per-call upstream timeout |
+
+The legacy `OLLAMA_URL` env var still works (read as fallback when `UPSTREAM_URL` is unset) so local dev setups don't break.
 
 ## Schema-enforced decoding
 

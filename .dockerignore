@@ -1,0 +1,15 @@
+node_modules
+.git
+.gitignore
+.env
+.env.local
+.env.example
+data
+coverage
+tests
+*.log
+.DS_Store
+.idea
+.vscode
+README.md
+deploy

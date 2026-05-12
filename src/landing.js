@@ -50,7 +50,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 
   <div class="pill">
     <div class="head">Deterministic</div>
-    Every call is a closed function: input → bytes out. Schema-locked at the decoder level (the model physically can't emit non-conforming JSON). Model digest pinned, sampling settings pinned, temperature 0 by default. Run the same prompt 20 times, get 20 identical responses. Verifiable via the public bench.
+    Every call is a closed function: input → bytes out. Schema-locked at the decoder level (the model physically can't emit non-conforming JSON). Sampling settings pinned, temperature 0 by default. Run the same prompt 20 times, get 20 identical responses. Verifiable via the public bench — we re-run it against our live inference path on a published cadence so determinism is something you can audit, not something we ask you to take on faith.
   </div>
 
   <div class="pill">
@@ -73,7 +73,7 @@ const LANDING_HTML = `<!DOCTYPE html>
     </tr>
     <tr>
       <td class="pain"><strong>Your code stopped working two weeks ago.</strong> No one touched it. The provider rotated the model behind the same name.</td>
-      <td class="fix"><strong>Model digest is pinned.</strong> Same content hash every call. Upgrades are explicit operator actions, not silent vendor pushes.</td>
+      <td class="fix"><strong>The public bench runs against our live path on a published cadence.</strong> Drift shows up in the CSV the same day. Customers see the same audit we see. No "trust us" — the receipts are open.</td>
     </tr>
     <tr>
       <td class="pain"><strong>3 requests per minute on the starter tier.</strong> Your batch job runs at 3am. You wake to angry customers at 7.</td>
@@ -93,7 +93,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 
   <div class="pill">
     <div class="head">A runtime, not a model</div>
-    Open-weight models (Qwen, Llama, Mistral) are commodities. CogOS is the runtime layer above them — grammar-constrained decoders, pinned digests, tier routing per task shape, provenance events on every call. The model is the CPU. CogOS is the OS that makes it operable. The loop is what you ship against.
+    Open-weight models (Qwen, Llama, Mistral) are commodities. CogOS is the runtime layer above them — grammar-constrained decoders, tier routing per task shape, provenance events on every call, and an open determinism bench that audits the inference path on a published cadence. The model is the CPU. CogOS is the OS that makes it operable. The loop is what you ship against.
   </div>
 
   <div class="pill">
@@ -151,7 +151,7 @@ const LANDING_HTML = `<!DOCTYPE html>
 
   <div class="pill">
     <div class="head">What models?</div>
-    Qwen 2.5 (3B and 7B) today. Open-weight, content-addressed. New tiers (Llama 3.3, Mistral) land as discrete versioned upgrades — no silent swaps.
+    Qwen 2.5 (3B and 7B) today. Open-weight, content-addressed. New tiers (Llama 3.3, Mistral) land as discrete versioned upgrades — no silent swaps. The bench is re-run against the live inference path so any drift is published, not hidden.
   </div>
 
   <div class="pill">

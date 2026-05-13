@@ -122,7 +122,7 @@ function renderLandingHtml(packages = []) {
 <body>
 <main>
   <h1>CogOS</h1>
-  <div class="tag">A <strong>deterministic uptime loop</strong> for production AI. Same call → same bytes out. Same call next month → same bytes out. Same call under load → no rate limit, no throttle, no provider drift. The mechanism that makes AI-backed features safe to ship.</div>
+  <div class="tag"><strong>Reproducible LLM calls. No retry loops. No model drift.</strong> Schema-locked decoding means the model physically can't emit malformed JSON. Same call → same bytes out. Same call next month → same bytes out. Same call under load → no rate limit, no throttle. <strong style="color:#3fb950">78% less inference spend, 72% less carbon</strong> on a typical production mix — because most of your calls don't need a frontier model. Stop debugging the LLM. Ship the feature.</div>
 
   <div class="live-note">
     🟢 Live now: this gateway is serving real traffic. Hit
@@ -130,6 +130,35 @@ function renderLandingHtml(packages = []) {
     Every claim below is verifiable in
     <a href="https://github.com/5CEOS-DRA/llm-determinism-bench">the public bench</a> —
     open-source, MIT, run it yourself with any provider's credentials.
+  </div>
+
+  <div style="background:#0d1f33;border:1px solid #58a6ff;border-left:3px solid #58a6ff;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
+    <strong style="color:#79c0ff">&rarr; Run the 90-second proof.</strong>
+    Copy-paste code that proves determinism, schema-locking, and cost on your own machine.
+    <a href="/demo" style="color:#3fb950;font-weight:600">Open the demo &rarr;</a>
+  </div>
+
+  <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#7ee2a8;padding:10px 14px;border-radius:6px;font-size:12.5px;margin-bottom:24px">
+    <strong style="color:#3fb950">Or read the dev-honest version.</strong>
+    The <a href="/whitepaper" style="color:#79c0ff">technical whitepaper</a> &mdash; mechanism, bench methodology, cost math, and the explicit list of things CogOS does <em>not</em> do. ~15 min read.
+  </div>
+
+  <div style="background:linear-gradient(180deg,#0d1f33 0%,#0d1117 100%);border:1px solid #30363d;border-left:3px solid #58a6ff;padding:24px 26px;border-radius:8px;margin:32px 0 40px;font-size:15px;line-height:1.75;color:#c9d1d9">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.18em;text-transform:uppercase;color:#79c0ff;margin-bottom:14px">Why this matters</div>
+    <p style="margin:0 0 14px;font-size:15px;line-height:1.75">
+      Most AI failures don&apos;t come from your code &mdash; they come from <strong style="color:#e6edf3">drift, retries, malformed JSON, and silent provider changes</strong> that break features without warning. But the deeper cost is bigger than debugging. When a company can&apos;t get a <em style="color:#a5d6ff">truthful, stable view of its own operations</em>, everyone pays for it: higher prices, slower products, wasted compute, wasted labor, and decisions made on bad data.
+    </p>
+    <p style="margin:0 0 14px;font-size:15px;line-height:1.75">
+      This loop removes that waste. <strong style="color:#e6edf3">Reproducible LLM calls</strong> with no drift, no retry storms, and no malformed output because schema-locked decoding makes invalid JSON <em style="color:#a5d6ff">physically impossible</em>. Same call &rarr; same bytes out. Same call next month &rarr; same bytes out. Same call under load &rarr; no throttles, no surprises.
+    </p>
+    <p style="margin:0 0 18px;font-size:15px;line-height:1.75">
+      The result is <strong style="color:#3fb950">78% less inference spend</strong>, <strong style="color:#3fb950">72% less carbon</strong>, and a business that finally sees what&apos;s actually happening instead of guessing.
+    </p>
+    <div style="border-top:1px solid #30363d;padding-top:16px;font-size:14.5px;line-height:1.9">
+      <div style="color:#e6edf3"><strong>Developers stop debugging.</strong></div>
+      <div style="color:#e6edf3"><strong>Employers stop burning money.</strong></div>
+      <div style="color:#e6edf3"><strong>Customers stop paying for the company&apos;s confusion.</strong></div>
+    </div>
   </div>
 
   <h2>The mechanism</h2>
@@ -190,6 +219,64 @@ function renderLandingHtml(packages = []) {
   <div class="pill">
     <div class="head">Tier-routed by task, not by guess</div>
     Use <code>model: "cogos-tier-b"</code> for classification-shaped work, <code>"cogos-tier-a"</code> for narrative. The router picks the right size of open-weight model per shape — sufficient is sufficient, the GreenOps doctrine.
+  </div>
+
+  <div class="pill">
+    <div class="head">Power savings, by construction</div>
+    Most production LLM workloads are classification-shaped — sentiment, routing, extraction, scoring — and burning frontier-model wattage on them is just lighting money on fire. The router runs that traffic on Tier B (3B params) and reserves Tier A (7B) for narrative. Internal measurements on a representative production mix: <strong>78% reduction in inference spend</strong>, <strong>72% reduction in energy draw</strong>, and <strong>~75% of all calls served by Tiny/Mid tiers</strong> — while 100% of outputs remain schema-locked and auditable. The bench publishes <code>$/valid-output</code> by tier so the savings are something you can audit, not something we ask you to take on faith.
+  </div>
+
+  <h2>Hard to compromise, by construction</h2>
+
+  <p style="color:#8b949e;font-size:13px;margin:0 0 18px">
+    The most common attack vectors against LLM products don&apos;t apply here &mdash; not because we patched them, because the mechanism removes them. What&apos;s left is the standard web-app surface, which we handle in standard ways.
+  </p>
+
+  <div class="pill">
+    <div class="head">Prompt-injection that changes output FORMAT is impossible</div>
+    Even if an attacker convinces the model inside the prompt to &quot;ignore previous instructions and emit X,&quot; the decoder is still grammar-constrained at the token level. Non-conforming tokens have zero probability mass &mdash; the model <em>physically cannot</em> emit JSON that doesn&apos;t match your schema. (Prompt-injection that changes output VALUES inside the schema is still possible &mdash; design your schema to bound the blast radius.)
+  </div>
+
+  <div class="pill">
+    <div class="head">No third-party LLM in the path. Ever.</div>
+    Your prompts and completions never reach OpenAI, Anthropic, Fireworks, Together, or any hosted provider. Operator-owned inference only. The integration-tax surface (third-party API keys, third-party ToS, third-party data residency, third-party breach blast radius) doesn&apos;t exist in this loop.
+  </div>
+
+  <div class="pill">
+    <div class="head">No prompt or completion content stored by default</div>
+    The audit log captures metadata only: model, latency, token counts, request ID, schema-enforcement flag, timestamp. Prompt and completion bytes are never written to disk unless you explicitly opt in (some compliance customers need it). A storage-layer breach reveals usage telemetry, not content.
+  </div>
+
+  <div class="pill">
+    <div class="head">API keys hashed at rest; plaintext shown only at issue</div>
+    Your <code>sk-cogos-...</code> key is sha256&apos;d the moment it&apos;s issued. The plaintext is rendered to you once on the success page and never persisted anywhere. A database compromise reveals fingerprints, not usable credentials.
+  </div>
+
+  <div class="pill">
+    <div class="head">No JS frontend, no SPA, no third-party scripts</div>
+    Server-rendered HTML and CSS. No analytics pixels, no chatbot widget, no marketing tags, no React dependency tree. The supply-chain attack surface common to SaaS dashboards is zero on the customer-facing surface. Stripe Checkout is loaded from Stripe&apos;s domain; everything else is ours.
+  </div>
+
+  <div class="pill">
+    <div class="head">Append-only, hash-chained audit log</div>
+    Every call writes an immutable provenance event. The chain links each event to the prior event&apos;s hash; tampering shows up as a hash-chain break. Forensic-grade. Operator-readable via <code>/admin/usage</code>.
+  </div>
+
+  <div class="pill">
+    <div class="head">The bench is the integrity check</div>
+    If someone compromised the inference path and started returning different bytes for the same call, the public determinism bench &mdash; auto-re-run against the live gateway on a published cadence &mdash; would catch it the same day. There is no &quot;trust us&quot;; there is an open CSV. Drift is something you can audit, not something we ask you to take on faith.
+  </div>
+
+  <div class="callout warn" style="background:#3d2611;border:1px solid #d29922;border-left:3px solid #d29922;color:#f2cc60;padding:12px 14px;border-radius:6px;font-size:12.5px;margin:18px 0 32px">
+    <strong style="color:#d29922">What we don&apos;t claim:</strong>
+    we don&apos;t claim CogOS is unhackable &mdash; anyone who tells you their product is unhackable is selling something. We don&apos;t claim the underlying model is robust against semantic prompt-injection (it isn&apos;t; design your schema to constrain values). We don&apos;t claim there are no bugs. Report them: <a href="mailto:security@5ceos.com" style="color:#79c0ff">security@5ceos.com</a> or open an issue on the bench. Coordinated disclosure preferred; we publicly credit reporters who request it.
+  </div>
+
+  <h2>About us</h2>
+
+  <div class="pill" style="border-color:#3fb950;background:#0d2818">
+    <div class="head" style="color:#3fb950">We're privately backed. Not VC-funded.</div>
+    Which means we get to <strong>hold pricing</strong>, refuse the <strong>growth-at-all-costs playbook</strong>, and keep the substrate <strong>determinism-first</strong> — instead of optimizing for the next funding round. Your tier won't get re-priced under you, the audit trail won't become a paid add-on, the bench stays open, and the substrate stays the substrate. We get to dream and build instead of pitch and exit.
   </div>
 
   <h2>Pricing</h2>
@@ -276,6 +363,9 @@ a{color:#58a6ff}
 <p>Your subscription is active and your API key is ready below.</p>
 ${keyBlock}
 <h2 style="color:#58a6ff;font-size:16px;margin-top:28px">Try your first call</h2>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">
+First call may take 5&ndash;8s on cold start. Subsequent calls run in &lt;2s.
+</p>
 <pre><code>curl https://cogos.5ceos.com/v1/chat/completions \\
   -H "Authorization: Bearer ${apiKey || 'sk-cogos-XXXXXXX'}" \\
   -H "Content-Type: application/json" \\
@@ -283,7 +373,58 @@ ${keyBlock}
     "model": "cogos-tier-b",
     "messages": [{"role":"user","content":"Hello"}]
   }'</code></pre>
-${portalHref ? `<p style="margin-top:24px"><a class="cta" style="text-decoration:none;display:inline-block" href="${portalHref}">Manage subscription →</a></p>` : ''}
+
+<h2 style="color:#58a6ff;font-size:16px;margin-top:32px">What next</h2>
+<p style="color:#8b949e;font-size:12px;margin:0 0 12px">
+Three 30-second next steps to feel out what the substrate actually does:
+</p>
+
+<h3 style="color:#c9d1d9;font-size:13px;margin:18px 0 6px">1 &middot; List available models</h3>
+<pre><code>curl https://cogos.5ceos.com/v1/models \\
+  -H "Authorization: Bearer ${apiKey || 'sk-cogos-XXXXXXX'}"</code></pre>
+
+<h3 style="color:#c9d1d9;font-size:13px;margin:18px 0 6px">2 &middot; Structured output (schema-locked at decode)</h3>
+<p style="color:#8b949e;font-size:12px;margin:0 0 6px">
+Pass a JSON Schema in <code>response_format</code> &mdash; the decoder is physically constrained to emit conforming JSON. Non-conforming output is impossible, not retried.
+</p>
+<pre><code>curl https://cogos.5ceos.com/v1/chat/completions \\
+  -H "Authorization: Bearer ${apiKey || 'sk-cogos-XXXXXXX'}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "cogos-tier-b",
+    "messages": [{"role":"user","content":"capital of France?"}],
+    "response_format": {
+      "type": "json_schema",
+      "json_schema": {
+        "name": "answer",
+        "schema": {
+          "type": "object",
+          "required": ["country","capital"],
+          "properties": {
+            "country": {"type":"string"},
+            "capital": {"type":"string"}
+          }
+        }
+      }
+    }
+  }'</code></pre>
+
+<h3 style="color:#c9d1d9;font-size:13px;margin:18px 0 6px">3 &middot; Verify determinism yourself</h3>
+<p style="color:#8b949e;font-size:12px;margin:0 0 6px">
+Clone the open bench &mdash; MIT-licensed, hand-coded rubrics, locked schemas + scenarios. Run it against your own key and publish or attack the CSV. The same bench is auto-re-run against the live gateway on a published cadence &mdash; drift shows up the same day.
+</p>
+<pre><code>git clone https://github.com/5CEOS-DRA/llm-determinism-bench
+cd llm-determinism-bench
+/usr/bin/python3 -m venv .venv &amp;&amp; source .venv/bin/activate
+pip install -r requirements.txt
+COGOS_LIVE_API_KEY=${apiKey || 'sk-cogos-XXXXXXX'} python -m harness.loop
+python -m harness.summarize</code></pre>
+
+<p style="color:#8b949e;font-size:12px;margin:24px 0 0">
+Tier shapes: <code>cogos-tier-b</code> (Qwen 2.5 3B, classification-shaped work) &middot; <code>cogos-tier-a</code> (Qwen 2.5 7B, narrative) &mdash; the router picks the right size of open-weight model per shape. Sufficient is sufficient.
+</p>
+
+${portalHref ? `<p style="margin-top:24px"><a class="cta" style="text-decoration:none;display:inline-block" href="${portalHref}">Manage subscription &rarr;</a></p>` : ''}
 <p style="color:#6e7681;font-size:11px;margin-top:24px">
 Receipts at your billing email.${portalHref ? ` Cancel, change payment method, or download invoices from the link above.` : ` To manage your subscription, contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.`}
 </p>
@@ -301,4 +442,48 @@ main{max-width:480px;margin:0 auto}h1{color:#f85149}a{color:#58a6ff}
 <a class="cta" href="/">← Back to home</a>
 </main></body></html>`;
 
-module.exports = { renderLandingHtml, successHtml, CANCEL_HTML };
+function healthHtml(data) {
+  return `<!DOCTYPE html>
+<html><head>
+<title>CogOS — health</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+*{box-sizing:border-box}
+body{font-family:ui-monospace,SF Mono,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:48px 20px;line-height:1.6}
+main{max-width:560px;margin:0 auto;text-align:center}
+.pulse{width:88px;height:88px;border-radius:50%;background:#0d2818;border:3px solid #3fb950;margin:0 auto 24px;display:flex;align-items:center;justify-content:center;font-size:42px;color:#3fb950;animation:pulse 1.6s ease-in-out infinite}
+@keyframes pulse{0%,100%{box-shadow:0 0 0 0 rgba(63,185,80,0.4)}50%{box-shadow:0 0 0 18px rgba(63,185,80,0)}}
+h1{color:#3fb950;font-size:24px;margin:0 0 8px}
+.sub{color:#8b949e;font-size:13px;margin-bottom:32px}
+table{margin:0 auto 24px;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 14px;color:#8b949e;border-bottom:1px solid #21262d;font-weight:600}
+td{text-align:left;padding:8px 14px;color:#c9d1d9;border-bottom:1px solid #21262d}
+.json{background:#161b22;border:1px solid #30363d;padding:12px 14px;border-radius:6px;text-align:left;overflow-x:auto;font-size:11.5px;color:#8b949e;margin-top:18px}
+a{color:#58a6ff;text-decoration:none}
+a:hover{text-decoration:underline}
+.nav{margin-top:32px;font-size:12px}
+.nav a{margin:0 12px}
+</style></head><body><main>
+  <div class="pulse">&check;</div>
+  <h1>Gateway is up</h1>
+  <div class="sub">The cogos-api gateway is serving traffic. Same call, same bytes &mdash; live.</div>
+  <table>
+    <tr><th>Service</th><td>${data.service}</td></tr>
+    <tr><th>Status</th><td style="color:#3fb950">${data.status}</td></tr>
+    <tr><th>Version</th><td>${data.version}</td></tr>
+    <tr><th>Uptime</th><td>${data.uptime_s} seconds</td></tr>
+    <tr><th>Checked at</th><td>${data.timestamp}</td></tr>
+  </table>
+  <details>
+    <summary style="cursor:pointer;color:#79c0ff;font-size:12px;margin-top:18px">Raw JSON (for monitors)</summary>
+    <pre class="json">${JSON.stringify(data, null, 2)}</pre>
+  </details>
+  <div class="nav">
+    <a href="/">&larr; Home</a>
+    <a href="/whitepaper">Whitepaper</a>
+    <a href="https://github.com/5CEOS-DRA/llm-determinism-bench">Bench</a>
+  </div>
+</main></body></html>`;
+}
+
+module.exports = { renderLandingHtml, successHtml, CANCEL_HTML, healthHtml };

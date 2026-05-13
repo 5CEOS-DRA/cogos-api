@@ -12,6 +12,8 @@ const stripeMod = require('./stripe');
 const packages = require('./packages');
 const landing = require('./landing');
 const legal = require('./legal');
+const whitepaper = require('./whitepaper');
+const demo = require('./demo');
 
 function createApp() {
   const app = express();
@@ -54,8 +56,25 @@ function createApp() {
   app.set('trust proxy', 1);
 
   // ---- Public health (no auth) ----
-  app.get('/health', (_req, res) => {
-    res.json({ status: 'ok', service: 'cogos-api', version: '0.1.0' });
+  // Content-negotiated: browsers get an HTML heartbeat page with a
+  // pulsing green check; monitors / curl / supertest get the JSON.
+  app.get('/health', (req, res) => {
+    const data = {
+      status: 'ok',
+      service: 'cogos-api',
+      version: '0.1.0',
+      uptime_s: Math.round(process.uptime()),
+      timestamp: new Date().toISOString(),
+    };
+    // Order matters: res.format() picks the FIRST key whose MIME matches
+    // the request's Accept. Browsers send `text/html,...` explicitly so
+    // they hit the HTML branch; curl, monitors, and supertest send `*/*`
+    // (or omit Accept entirely) and fall through to the JSON branch.
+    res.format({
+      'application/json': () => res.json(data),
+      'text/html': () => res.type('html').send(landing.healthHtml(data)),
+      default: () => res.json(data),
+    });
   });
 
   // ---- Public landing + signup + success/cancel ----
@@ -68,6 +87,8 @@ function createApp() {
   app.get('/terms', (_req, res) => res.type('html').send(legal.termsHtml()));
   app.get('/privacy', (_req, res) => res.type('html').send(legal.privacyHtml()));
   app.get('/aup', (_req, res) => res.type('html').send(legal.aupHtml()));
+  app.get('/whitepaper', (_req, res) => res.type('html').send(whitepaper.whitepaperHtml()));
+  app.get('/demo', (_req, res) => res.type('html').send(demo.demoHtml()));
 
   app.post('/signup', async (req, res) => {
     try {

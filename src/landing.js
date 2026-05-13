@@ -268,7 +268,7 @@ ${PRICING_HTML}
   </p>
 
   <div style="text-align:center;margin:24px 0 32px">
-    <a href="https://5ceos.com/#/examples" style="display:inline-block;background:#1f6feb;color:#fff;padding:14px 32px;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid #58a6ff">See the viewports on 5ceos.com &rarr;</a>
+    <a href="https://5ceos.com" style="display:inline-block;background:#1f6feb;color:#fff;padding:14px 32px;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid #58a6ff">Visit 5ceos.com &rarr;</a>
   </div>
 
   <h2>FAQ</h2>

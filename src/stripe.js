@@ -82,6 +82,9 @@ async function createCheckoutSession({ origin, packageId = null }) {
   if (!pkg) throw new Error('No packages configured — visit /admin/packages first');
   if (!pkg.stripe_price_id) throw new Error(`Package "${pkg.id}" has no stripe_price_id (Stripe sync not yet run)`);
 
+  // NOTE: `customer_creation` is invalid in subscription mode — Stripe
+  // auto-creates customers for subscriptions, so the field is rejected
+  // with "customer_creation can only be used in payment mode."
   const session = await getStripe().checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
@@ -90,7 +93,6 @@ async function createCheckoutSession({ origin, packageId = null }) {
     cancel_url: `${origin}/cancel`,
     allow_promotion_codes: true,
     billing_address_collection: 'auto',
-    customer_creation: 'always',
     metadata: {
       product: 'cogos-api',
       cogos_package_id: pkg.id,

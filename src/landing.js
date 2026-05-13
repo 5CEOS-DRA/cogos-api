@@ -263,32 +263,12 @@ ${PRICING_HTML}
 
   <h2>Built with CogOS</h2>
 
-  <p style="color:#8b949e;font-size:13.5px;margin:0 0 14px">
-    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production on <a href="https://5ceos.com">5ceos.com</a>. Every contradiction, every cited paragraph, every receipt below was generated through the same deterministic loop this page sells.
+  <p style="color:#8b949e;font-size:13.5px;margin:0 0 18px">
+    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production. TruthPulse, the Enron evidence corpus, Cross-Exam commitment-drift detection, multi-company contradiction tracking. Every receipt was generated through the same deterministic loop this page sells.
   </p>
 
-  <div class="pill">
-    <div class="head">TruthPulse &mdash; multi-company contradiction tracker</div>
-    Active drift &amp; contradiction detection across IBM, Microsoft, Oracle, Salesforce, and other megacaps. Schema-locked, hash-chained, replayable.
-    <div style="margin-top:10px"><a href="https://5ceos.com/#/truth-report">Open TruthPulse &rarr;</a></div>
-  </div>
-
-  <div class="pill">
-    <div class="head">Enron evidence viewport</div>
-    The 1.5M-document Enron corpus, ingested into the same substrate. Searchable contradictions, executive-by-executive evidence trails.
-    <div style="margin-top:10px"><a href="https://5ceos.com/#/enron-evidence">Open Enron viewport &rarr;</a></div>
-  </div>
-
-  <div class="pill">
-    <div class="head">Cross-Exam &mdash; commitment-drift detection</div>
-    Operational substrate for tracking the gap between what an org said it would do and what it actually did. Built on the same schema-locked loop.
-    <div style="margin-top:10px"><a href="https://5ceos.com/#/cross-exam">Open Cross-Exam &rarr;</a></div>
-  </div>
-
-  <div class="pill">
-    <div class="head">Examples hub</div>
-    Every public viewport and the CogOS primitives each one composes. The dev-facing tour of what the substrate makes possible.
-    <div style="margin-top:10px"><a href="https://5ceos.com/#/examples">Open the examples hub &rarr;</a></div>
+  <div style="text-align:center;margin:24px 0 32px">
+    <a href="https://5ceos.com/#/examples" style="display:inline-block;background:#1f6feb;color:#fff;padding:14px 32px;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid #58a6ff">See the viewports on 5ceos.com &rarr;</a>
   </div>
 
   <h2>FAQ</h2>

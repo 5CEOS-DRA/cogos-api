@@ -20,6 +20,7 @@ const path = require('path');
 const logger = require('./logger');
 const keys = require('./keys');
 const packages = require('./packages');
+const crmWebhook = require('./crm-webhook');
 
 const EVENTS_FILE = process.env.STRIPE_EVENTS_FILE
   || path.join(__dirname, '..', 'data', 'stripe-events.json');
@@ -181,6 +182,20 @@ async function handleCheckoutCompleted(event) {
     key_id: record.id,
     email,
   });
+
+  // Fire CRM webhook for the 5RM bridge. Best-effort; no-op if
+  // CRM_WEBHOOK_URL / CRM_WEBHOOK_SECRET aren't configured yet.
+  try {
+    const fullKey = keys.list().find((r) => r.id === record.id) || record;
+    await crmWebhook.emit('customer.created', crmWebhook.buildCustomerCreatedPayload({
+      keyRecord: fullKey,
+      packageRecord: pkg,
+      stripeData: { email, customer_id: customerId, subscription_id: subscriptionId },
+    }));
+  } catch (e) {
+    logger.warn('crm_webhook_customer_created_failed', { error: e.message, key_id: record.id });
+  }
+
   return { plaintext, key_id: record.id };
 }
 
@@ -195,6 +210,7 @@ async function handleSubscriptionUpdated(event) {
     return;
   }
   const shouldRevoke = ['canceled', 'incomplete_expired', 'unpaid'].includes(status);
+  const oldStatus = existing.stripe_subscription_status;
   keys.updateStripeStatus(existing.id, {
     status,
     active: shouldRevoke ? false : undefined,
@@ -207,6 +223,20 @@ async function handleSubscriptionUpdated(event) {
     revoked: shouldRevoke,
   });
   markEventProcessed(event.id, event.type, { key_id: existing.id, status });
+
+  // CRM webhook — relay subscription state change to 5RM.
+  try {
+    const fullKey = keys.list().find((r) => r.id === existing.id) || existing;
+    await crmWebhook.emit('customer.subscription_status_changed',
+      crmWebhook.buildSubscriptionStatusChangedPayload({
+        keyRecord: fullKey,
+        oldStatus,
+        newStatus: status,
+      }),
+    );
+  } catch (e) {
+    logger.warn('crm_webhook_subscription_changed_failed', { error: e.message, key_id: existing.id });
+  }
 }
 
 // ---------------------------------------------------------------------------

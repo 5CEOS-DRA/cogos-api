@@ -226,52 +226,6 @@ function renderLandingHtml(packages = []) {
     Most production LLM workloads are classification-shaped — sentiment, routing, extraction, scoring — and burning frontier-model wattage on them is just lighting money on fire. The router runs that traffic on Tier B (3B params) and reserves Tier A (7B) for narrative. Internal measurements on a representative production mix: <strong>78% reduction in inference spend</strong>, <strong>72% reduction in energy draw</strong>, and <strong>~75% of all calls served by Tiny/Mid tiers</strong> — while 100% of outputs remain schema-locked and auditable. The bench publishes <code>$/valid-output</code> by tier so the savings are something you can audit, not something we ask you to take on faith.
   </div>
 
-  <h2>Hard to compromise, by construction</h2>
-
-  <p style="color:#8b949e;font-size:13px;margin:0 0 18px">
-    The most common attack vectors against LLM products don&apos;t apply here &mdash; not because we patched them, because the mechanism removes them. What&apos;s left is the standard web-app surface, which we handle in standard ways.
-  </p>
-
-  <div class="pill">
-    <div class="head">Prompt-injection that changes output FORMAT is impossible</div>
-    Even if an attacker convinces the model inside the prompt to &quot;ignore previous instructions and emit X,&quot; the decoder is still grammar-constrained at the token level. Non-conforming tokens have zero probability mass &mdash; the model <em>physically cannot</em> emit JSON that doesn&apos;t match your schema. (Prompt-injection that changes output VALUES inside the schema is still possible &mdash; design your schema to bound the blast radius.)
-  </div>
-
-  <div class="pill">
-    <div class="head">No third-party LLM in the path. Ever.</div>
-    Your prompts and completions never reach OpenAI, Anthropic, Fireworks, Together, or any hosted provider. Operator-owned inference only. The integration-tax surface (third-party API keys, third-party ToS, third-party data residency, third-party breach blast radius) doesn&apos;t exist in this loop.
-  </div>
-
-  <div class="pill">
-    <div class="head">No prompt or completion content stored by default</div>
-    The audit log captures metadata only: model, latency, token counts, request ID, schema-enforcement flag, timestamp. Prompt and completion bytes are never written to disk unless you explicitly opt in (some compliance customers need it). A storage-layer breach reveals usage telemetry, not content.
-  </div>
-
-  <div class="pill">
-    <div class="head">API keys hashed at rest; plaintext shown only at issue</div>
-    Your <code>sk-cogos-...</code> key is sha256&apos;d the moment it&apos;s issued. The plaintext is rendered to you once on the success page and never persisted anywhere. A database compromise reveals fingerprints, not usable credentials.
-  </div>
-
-  <div class="pill">
-    <div class="head">No JS frontend, no SPA, no third-party scripts</div>
-    Server-rendered HTML and CSS. No analytics pixels, no chatbot widget, no marketing tags, no React dependency tree. The supply-chain attack surface common to SaaS dashboards is zero on the customer-facing surface. Stripe Checkout is loaded from Stripe&apos;s domain; everything else is ours.
-  </div>
-
-  <div class="pill">
-    <div class="head">Append-only, hash-chained audit log</div>
-    Every call writes an immutable provenance event. The chain links each event to the prior event&apos;s hash; tampering shows up as a hash-chain break. Forensic-grade. Operator-readable via <code>/admin/usage</code>.
-  </div>
-
-  <div class="pill">
-    <div class="head">The bench is the integrity check</div>
-    If someone compromised the inference path and started returning different bytes for the same call, the public determinism bench &mdash; auto-re-run against the live gateway on a published cadence &mdash; would catch it the same day. There is no &quot;trust us&quot;; there is an open CSV. Drift is something you can audit, not something we ask you to take on faith.
-  </div>
-
-  <div class="callout warn" style="background:#3d2611;border:1px solid #d29922;border-left:3px solid #d29922;color:#f2cc60;padding:12px 14px;border-radius:6px;font-size:12.5px;margin:18px 0 32px">
-    <strong style="color:#d29922">What we don&apos;t claim:</strong>
-    we don&apos;t claim CogOS is unhackable &mdash; anyone who tells you their product is unhackable is selling something. We don&apos;t claim the underlying model is robust against semantic prompt-injection (it isn&apos;t; design your schema to constrain values). We don&apos;t claim there are no bugs. Report them: <a href="mailto:security@5ceos.com" style="color:#79c0ff">security@5ceos.com</a> or open an issue on the bench. Coordinated disclosure preferred; we publicly credit reporters who request it.
-  </div>
-
   <h2>About us</h2>
 
   <div class="pill" style="border-color:#3fb950;background:#0d2818">
@@ -310,13 +264,31 @@ ${PRICING_HTML}
   <h2>Built with CogOS</h2>
 
   <p style="color:#8b949e;font-size:13.5px;margin:0 0 14px">
-    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production. Multi-company litigation substrate, the Enron evidence corpus, commitment-tracking modules, contradiction detection across executive communications. Every contradiction, every cited paragraph, every receipt was generated through the same deterministic loop this page sells.
+    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production on <a href="https://5ceos.com">5ceos.com</a>. Every contradiction, every cited paragraph, every receipt below was generated through the same deterministic loop this page sells.
   </p>
 
-  <div class="pill" style="border-left:3px solid #58a6ff">
-    <div class="head">See the substrate at work</div>
-    <a href="https://5ceos.com" style="font-size:15px;color:#79c0ff;text-decoration:none">5ceos.com &rarr;</a>
-    <span style="color:#8b949e;font-size:12.5px;margin-left:10px">&mdash; operator surfaces built on this loop</span>
+  <div class="pill">
+    <div class="head">TruthPulse &mdash; multi-company contradiction tracker</div>
+    Active drift &amp; contradiction detection across IBM, Microsoft, Oracle, Salesforce, and other megacaps. Schema-locked, hash-chained, replayable.
+    <div style="margin-top:10px"><a href="https://5ceos.com/#/truth-report">Open TruthPulse &rarr;</a></div>
+  </div>
+
+  <div class="pill">
+    <div class="head">Enron evidence viewport</div>
+    The 1.5M-document Enron corpus, ingested into the same substrate. Searchable contradictions, executive-by-executive evidence trails.
+    <div style="margin-top:10px"><a href="https://5ceos.com/#/enron-evidence">Open Enron viewport &rarr;</a></div>
+  </div>
+
+  <div class="pill">
+    <div class="head">Cross-Exam &mdash; commitment-drift detection</div>
+    Operational substrate for tracking the gap between what an org said it would do and what it actually did. Built on the same schema-locked loop.
+    <div style="margin-top:10px"><a href="https://5ceos.com/#/cross-exam">Open Cross-Exam &rarr;</a></div>
+  </div>
+
+  <div class="pill">
+    <div class="head">Examples hub</div>
+    Every public viewport and the CogOS primitives each one composes. The dev-facing tour of what the substrate makes possible.
+    <div style="margin-top:10px"><a href="https://5ceos.com/#/examples">Open the examples hub &rarr;</a></div>
   </div>
 
   <h2>FAQ</h2>

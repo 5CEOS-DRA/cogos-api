@@ -14,6 +14,7 @@ const landing = require('./landing');
 const legal = require('./legal');
 const whitepaper = require('./whitepaper');
 const demo = require('./demo');
+const cookbook = require('./cookbook');
 
 function createApp() {
   const app = express();
@@ -89,6 +90,7 @@ function createApp() {
   app.get('/aup', (_req, res) => res.type('html').send(legal.aupHtml()));
   app.get('/whitepaper', (_req, res) => res.type('html').send(whitepaper.whitepaperHtml()));
   app.get('/demo', (_req, res) => res.type('html').send(demo.demoHtml()));
+  app.get('/cookbook', (_req, res) => res.type('html').send(cookbook.cookbookHtml()));
 
   app.post('/signup', async (req, res) => {
     try {

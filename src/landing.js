@@ -138,6 +138,11 @@ function renderLandingHtml(packages = []) {
     <a href="/demo" style="color:#3fb950;font-weight:600">Open the demo &rarr;</a>
   </div>
 
+  <div style="background:#3d2f0a;border:1px solid #d29922;border-left:3px solid #d29922;color:#f2cc60;padding:10px 14px;border-radius:6px;font-size:12.5px;margin-bottom:14px">
+    <strong style="color:#d29922">Or browse the cookbook.</strong>
+    Six archetypal patterns &mdash; extraction, classification, routing, scoring, agent step, multi-extract. <a href="/cookbook" style="color:#79c0ff">Copy-paste recipes &rarr;</a>
+  </div>
+
   <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#7ee2a8;padding:10px 14px;border-radius:6px;font-size:12.5px;margin-bottom:24px">
     <strong style="color:#3fb950">Or read the dev-honest version.</strong>
     The <a href="/whitepaper" style="color:#79c0ff">technical whitepaper</a> &mdash; mechanism, bench methodology, cost math, and the explicit list of things CogOS does <em>not</em> do. ~15 min read.

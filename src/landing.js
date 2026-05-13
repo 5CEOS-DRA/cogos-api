@@ -307,6 +307,18 @@ ${PRICING_HTML}
     }
   }'</code></pre>
 
+  <h2>Built with CogOS</h2>
+
+  <p style="color:#8b949e;font-size:13.5px;margin:0 0 14px">
+    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production. Multi-company litigation substrate, the Enron evidence corpus, commitment-tracking modules, contradiction detection across executive communications. Every contradiction, every cited paragraph, every receipt was generated through the same deterministic loop this page sells.
+  </p>
+
+  <div class="pill" style="border-left:3px solid #58a6ff">
+    <div class="head">See the substrate at work</div>
+    <a href="https://5ceos.com" style="font-size:15px;color:#79c0ff;text-decoration:none">5ceos.com &rarr;</a>
+    <span style="color:#8b949e;font-size:12.5px;margin-left:10px">&mdash; operator surfaces built on this loop</span>
+  </div>
+
   <h2>FAQ</h2>
 
   <div class="pill">

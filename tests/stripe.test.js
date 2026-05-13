@@ -263,10 +263,19 @@ describe('GET /success', () => {
   });
 
   test('unknown session_id → success page with closed-window warning', async () => {
-    const res = await request(buildApp()).get('/success?session_id=cs_nonexistent');
-    expect(res.status).toBe(200);
-    // Copy now says "display window for this key has closed" + a support link.
-    // Accept any of: legacy "expired", new "closed", or the support mailto.
-    expect(res.text).toMatch(/expired|closed|support@5ceos\.com/i);
+    // Drive the webhook-arrival poll loop to zero so this test doesn't hit
+    // the 10s production polling window.
+    const prev = process.env.SUCCESS_POLL_DEADLINE_MS;
+    process.env.SUCCESS_POLL_DEADLINE_MS = '0';
+    try {
+      const res = await request(buildApp()).get('/success?session_id=cs_nonexistent');
+      expect(res.status).toBe(200);
+      // Copy now says "display window for this key has closed" + a support link.
+      // Accept any of: legacy "expired", new "closed", or the support mailto.
+      expect(res.text).toMatch(/expired|closed|support@5ceos\.com/i);
+    } finally {
+      if (prev === undefined) delete process.env.SUCCESS_POLL_DEADLINE_MS;
+      else process.env.SUCCESS_POLL_DEADLINE_MS = prev;
+    }
   });
 });

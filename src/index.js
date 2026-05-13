@@ -89,11 +89,27 @@ function createApp() {
     }
   });
 
-  app.get('/success', (req, res) => {
+  app.get('/success', async (req, res) => {
     const sessionId = req.query.session_id;
     if (!sessionId) return res.status(400).send('Missing session_id');
-    const issued = stripeMod.getNewlyIssuedKey(sessionId);
-    // If webhook hasn't fired yet (race on checkout completion), issued is null.
+    // Poll for the webhook-issued key for up to ~10s before falling back.
+    // Stripe webhooks usually arrive in <2s, but launch-day spikes can push
+    // delivery past the redirect — and showing "display window closed" to a
+    // customer who JUST paid is the worst possible UX moment in the funnel.
+    // Configurable via env so tests can drive the timeout to zero.
+    const DEADLINE_MS = parseInt(process.env.SUCCESS_POLL_DEADLINE_MS || '10000', 10);
+    const INTERVAL_MS = parseInt(process.env.SUCCESS_POLL_INTERVAL_MS || '400', 10);
+    const startedAt = Date.now();
+    let issued = stripeMod.getNewlyIssuedKey(sessionId);
+    while (!issued && Date.now() - startedAt < DEADLINE_MS) {
+      await new Promise((r) => setTimeout(r, INTERVAL_MS));
+      issued = stripeMod.getNewlyIssuedKey(sessionId);
+    }
+    if (!issued) {
+      logger.warn('success_key_lookup_timeout', {
+        session_id: sessionId, waited_ms: Date.now() - startedAt,
+      });
+    }
     res.type('html').send(landing.successHtml({
       apiKey: issued ? issued.api_key : null,
       keyId: issued ? issued.key_id : null,

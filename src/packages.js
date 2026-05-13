@@ -144,16 +144,33 @@ async function stripeSyncUpdate(oldPkg, newPkg) {
     return stripeSyncCreate(newPkg);
   }
   const stripe = getStripe();
-  if (oldPkg.stripe_product_id) {
-    await stripe.products.update(oldPkg.stripe_product_id, {
-      name: newPkg.display_name,
-      description: newPkg.description || undefined,
-      metadata: {
-        cogos_package_id: newPkg.id,
-        monthly_request_quota: String(newPkg.monthly_request_quota),
-        allowed_model_tiers: newPkg.allowed_model_tiers.join(','),
-      },
-    });
+  // Orphan-ID promotion: if oldPkg's Stripe IDs reference Products/Prices
+  // that don't exist in the CURRENT Stripe environment, treat as fresh
+  // create. This catches the test→live transition (test-mode IDs are
+  // real and well-formed but absent from live mode) as well as
+  // manually-deleted Stripe products. Generalizes the stub-mode catch.
+  try {
+    if (oldPkg.stripe_product_id) {
+      await stripe.products.update(oldPkg.stripe_product_id, {
+        name: newPkg.display_name,
+        description: newPkg.description || undefined,
+        metadata: {
+          cogos_package_id: newPkg.id,
+          monthly_request_quota: String(newPkg.monthly_request_quota),
+          allowed_model_tiers: newPkg.allowed_model_tiers.join(','),
+        },
+      });
+    }
+  } catch (e) {
+    if (e && (e.message || '').includes('No such')) {
+      logger.info('package_stripe_promote_from_orphan', {
+        id: newPkg.id,
+        orphan_product_id: oldPkg.stripe_product_id,
+        reason: e.message,
+      });
+      return stripeSyncCreate(newPkg);
+    }
+    throw e;
   }
   if (oldPkg.monthly_usd !== newPkg.monthly_usd && oldPkg.stripe_price_id) {
     // Stripe prices are immutable — create new, archive old.

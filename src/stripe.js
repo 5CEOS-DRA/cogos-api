@@ -160,13 +160,17 @@ async function handleCheckoutCompleted(event) {
     }
   }
 
-  // Also persist the plaintext temporarily in the event log so /success
-  // can fetch it within ~10 minutes (until rotation/expiry).
+  // Persist the plaintext temporarily in the event log so /success can
+  // fetch it. Window was 10 minutes; real customers click the receipt
+  // email link well after that, so extended to 24 hours. After expiry
+  // the key remains valid in the database, but the plaintext cannot be
+  // shown again — they have to manage from /portal (Stripe Customer
+  // Portal) and contact support for a rotation if they lost it.
   markEventProcessed(event.id, event.type, {
     session_id: session.id,
     key_id: record.id,
     plaintext_short_lived: plaintext,
-    plaintext_expires_at: new Date(Date.now() + 10 * 60_000).toISOString(),
+    plaintext_expires_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
   });
 
   logger.info('stripe_checkout_completed', {
@@ -206,6 +210,33 @@ async function handleSubscriptionUpdated(event) {
 }
 
 // ---------------------------------------------------------------------------
+// /portal — customer self-serve subscription management
+// ---------------------------------------------------------------------------
+// Stripe-hosted billing portal. The customer manages payment method,
+// downloads invoices, and cancels their subscription. The portal must
+// be enabled in the Stripe dashboard (Settings → Billing → Customer
+// Portal → Activate) once per account. The function below creates a
+// portal session bound to the customer; the caller redirects to the
+// returned URL.
+async function createCustomerPortalSession({ customerId, returnUrl }) {
+  if (!customerId) throw new Error('customerId required');
+  const session = await getStripe().billingPortal.sessions.create({
+    customer: customerId,
+    return_url: returnUrl || 'https://cogos.5ceos.com/',
+  });
+  return session;
+}
+
+// Resolve a checkout session_id (which the customer holds via their
+// success URL) to the Stripe customer ID we issued their key against.
+// Used by GET /portal?session_id=... so the customer self-authenticates
+// by holding their original receipt URL.
+function findStripeCustomerBySession(sessionId) {
+  const k = findKeyBySession(sessionId);
+  return k && k.stripe_customer_id ? k.stripe_customer_id : null;
+}
+
+// ---------------------------------------------------------------------------
 // /success — show the API key ONCE (read from short-lived event-log entry)
 // ---------------------------------------------------------------------------
 function getNewlyIssuedKey(sessionId) {
@@ -223,6 +254,8 @@ function getNewlyIssuedKey(sessionId) {
 
 module.exports = {
   createCheckoutSession,
+  createCustomerPortalSession,
+  findStripeCustomerBySession,
   verifyAndParseEvent,
   handleCheckoutCompleted,
   handleSubscriptionUpdated,

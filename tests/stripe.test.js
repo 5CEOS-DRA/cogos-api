@@ -262,9 +262,11 @@ describe('GET /success', () => {
     expect(res.status).toBe(400);
   });
 
-  test('unknown session_id → success page with expired warning', async () => {
+  test('unknown session_id → success page with closed-window warning', async () => {
     const res = await request(buildApp()).get('/success?session_id=cs_nonexistent');
     expect(res.status).toBe(200);
-    expect(res.text).toMatch(/expired|contact support/i);
+    // Copy now says "display window for this key has closed" + a support link.
+    // Accept any of: legacy "expired", new "closed", or the support mailto.
+    expect(res.text).toMatch(/expired|closed|support@5ceos\.com/i);
   });
 });

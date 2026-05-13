@@ -98,7 +98,49 @@ function createApp() {
       apiKey: issued ? issued.api_key : null,
       keyId: issued ? issued.key_id : null,
       expiresAt: issued ? issued.expires_at : null,
+      sessionId, // passed through so the Manage-subscription link works
     }));
+  });
+
+  // ---- Customer Portal redirect ---------------------------------------------
+  // Customer holds their success URL (?session_id=cs_test_...). Hitting
+  // /portal with that session_id authenticates them as the customer who
+  // bought that subscription, looks up their Stripe customer ID, creates
+  // a portal session, and redirects them to Stripe-hosted billing mgmt.
+  app.get('/portal', async (req, res) => {
+    const sessionId = req.query.session_id;
+    if (!sessionId) {
+      return res.status(400).type('html').send(
+        '<p>Missing session_id. Use the link from your receipt or contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</p>',
+      );
+    }
+    const customerId = stripeMod.findStripeCustomerBySession(sessionId);
+    if (!customerId) {
+      return res.status(404).type('html').send(
+        '<p>No subscription found for that session. Contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</p>',
+      );
+    }
+    try {
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      const returnUrl = `${proto}://${host}/`;
+      const session = await stripeMod.createCustomerPortalSession({
+        customerId,
+        returnUrl,
+      });
+      logger.info('stripe_portal_session_created', {
+        customer_id: customerId, session_id: sessionId,
+      });
+      return res.redirect(303, session.url);
+    } catch (e) {
+      logger.error('stripe_portal_session_failed', {
+        customer_id: customerId, error: e.message,
+      });
+      return res.status(500).type('html').send(
+        `<p>Could not open customer portal: ${e.message}.<br>` +
+        `Contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</p>`,
+      );
+    }
   });
 
   // ---- Public chat-completions surface ----

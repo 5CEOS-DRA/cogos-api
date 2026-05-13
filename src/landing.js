@@ -41,14 +41,16 @@ function renderPricingPill(pkg) {
 // The Enterprise pill is a static, sales-led offering — it is NOT a Stripe
 // package because Enterprise contracts are negotiated (region pinning,
 // dedicated GPU, MSA, SLA add-ons). The number is published on the page
-// for honesty; the CTA opens a sales conversation.
+// for honesty per Denny's directive ("show the enterprise prices and not
+// hide it like the others"). No CTA — the price + description signal
+// the tier exists; interested parties contact enterprise@5ceos.com via
+// the footer or directly.
 const ENTERPRISE_PILL_HTML = `
   <div class="pill" style="border-color:#58a6ff;background:#0d1f33">
     <div class="head">Enterprise</div>
     <div class="price">$100,000/yr</div>
     <div class="price-sub">50M requests/mo · dedicated GPU container · single-tenant · 99.9% SLA · SOC 2 Type II · MSA + DPA + BAA · quarterly business review · 12-month minimum</div>
-    <div class="price-sub" style="margin-bottom:14px">Real deals close at $100K–$250K depending on add-ons (extra GPUs, 99.95% SLA, on-prem deployment, dedicated CSM).</div>
-    <a class="cta" href="mailto:enterprise@5ceos.com?subject=CogOS%20Enterprise%20inquiry">Talk to sales →</a>
+    <div class="price-sub">Real deals close at $100K–$250K depending on add-ons (extra GPUs, 99.95% SLA, on-prem deployment, dedicated CSM).</div>
   </div>`;
 
 function renderPricingSection(packages) {
@@ -245,15 +247,16 @@ ${AT_LIMIT_FAQ_HTML}
 </html>`;
 }
 
-function successHtml({ apiKey, keyId, expiresAt }) {
+function successHtml({ apiKey, keyId, expiresAt, sessionId }) {
+  const portalHref = sessionId ? `/portal?session_id=${encodeURIComponent(sessionId)}` : null;
   const keyBlock = apiKey
     ? `<pre id="apikey"><code>${apiKey}</code></pre>
        <button onclick="navigator.clipboard.writeText('${apiKey}')" class="cta">Copy key</button>
-       <div class="warn">⚠ This is the only time we'll show this key. Save it now.
-       (Display window expires at ${expiresAt}; the key itself remains valid.)</div>`
-    : `<div class="warn">This success page expired (10-min window).
-       Your key was issued — check your billing receipt email for confirmation.
-       To rotate or recover, contact support.</div>`;
+       <div class="warn">⚠ This key is displayed for 24 hours after issuance. Save it now — after the window closes, the key remains valid but cannot be re-displayed.
+       (Display window expires at ${expiresAt}.)</div>`
+    : `<div class="warn">The 24-hour display window for this key has closed.
+       Your key was issued and is still valid — bookmark this page next time to keep access for the full window.
+       To rotate or recover, contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</div>`;
 
   return `<!DOCTYPE html>
 <html><head>
@@ -280,8 +283,9 @@ ${keyBlock}
     "model": "cogos-tier-b",
     "messages": [{"role":"user","content":"Hello"}]
   }'</code></pre>
+${portalHref ? `<p style="margin-top:24px"><a class="cta" style="text-decoration:none;display:inline-block" href="${portalHref}">Manage subscription →</a></p>` : ''}
 <p style="color:#6e7681;font-size:11px;margin-top:24px">
-Receipts at your billing email. Cancel anytime via customer portal.
+Receipts at your billing email.${portalHref ? ` Cancel, change payment method, or download invoices from the link above.` : ` To manage your subscription, contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.`}
 </p>
 </main></body></html>`;
 }

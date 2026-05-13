@@ -261,16 +261,6 @@ ${PRICING_HTML}
     }
   }'</code></pre>
 
-  <h2>Built with CogOS</h2>
-
-  <p style="color:#8b949e;font-size:13.5px;margin:0 0 18px">
-    The substrate isn&apos;t just an inference endpoint &mdash; it powers operator-grade evidence work in production. TruthPulse, the Enron evidence corpus, Cross-Exam commitment-drift detection, multi-company contradiction tracking. Every receipt was generated through the same deterministic loop this page sells.
-  </p>
-
-  <div style="text-align:center;margin:24px 0 32px">
-    <a href="https://5ceos.com" style="display:inline-block;background:#1f6feb;color:#fff;padding:14px 32px;border-radius:8px;font-size:15px;font-weight:600;text-decoration:none;border:1px solid #58a6ff">Visit 5ceos.com &rarr;</a>
-  </div>
-
   <h2>FAQ</h2>
 
   <div class="pill">

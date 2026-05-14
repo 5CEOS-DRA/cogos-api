@@ -44,6 +44,16 @@ if [ -z "${COSIGN_KEY_FILE:-}" ] && [ -f "$PWD/cosign.key" ]; then
   COSIGN_KEY_FILE="$PWD/cosign.key"
   echo "[deploy] auto-detected COSIGN_KEY_FILE=$COSIGN_KEY_FILE"
 fi
+# Auto-fetch COSIGN_PASSWORD from Key Vault if unset locally. Lets a
+# single bash deploy-update.sh sign automatically without exporting the
+# password into the shell on every machine.
+if [ -z "${COSIGN_PASSWORD:-}" ] && [ -n "${COSIGN_KEY_FILE:-}" ]; then
+  KV_PW=$(az keyvault secret show --vault-name cogos-kv-16d2bb --name cosign-password --query value -o tsv 2>/dev/null || true)
+  if [ -n "$KV_PW" ]; then
+    COSIGN_PASSWORD="$KV_PW"
+    echo "[deploy] auto-fetched COSIGN_PASSWORD from Key Vault"
+  fi
+fi
 if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ]; then
   if command -v cosign &>/dev/null; then
     COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" || echo "[deploy] WARN: cosign sign exited non-zero — proceeding without enforcement (week-0 additive)"

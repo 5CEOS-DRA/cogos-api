@@ -332,8 +332,70 @@ function createApp() {
     }
     const limit = Math.min(1000, Math.max(0, Math.floor(limitRaw)));
     const tenantId = req.apiKey && req.apiKey.tenant_id;
-    const rows = usage.readByTenant(tenantId, sinceMs, limit);
-    const chain = usage.verifyChain(rows);
+    // app_id query param scopes the slice to a single app's chain. When
+    // omitted, the response is the interleaved cross-app view for the
+    // whole tenant — chain_ok is computed per-app and surfaced as
+    // chain_ok_by_app so the caller can verify each app independently.
+    // Validate the query param shape against the same slug rules
+    // src/keys.js uses on issue. Invalid app_id → 400 (don't 200 with
+    // empty rows because that would silently hide a typo).
+    const rawAppId = req.query.app_id;
+    let scopedAppId = null; // null = cross-app
+    if (rawAppId != null && rawAppId !== '') {
+      try {
+        scopedAppId = keys.normalizeAppId(rawAppId);
+      } catch (e) {
+        return res.status(400).json({
+          error: { message: e.message, type: 'invalid_request_error' },
+        });
+      }
+    }
+
+    const rows = usage.readSlice({
+      tenant_id: tenantId,
+      app_id: scopedAppId,    // null = cross-app
+      since: sinceMs,
+      limit,
+    });
+
+    // Chain verification semantics:
+    //   - scoped (single app)  → one chain check on the rows as returned.
+    //   - cross-app (no scope) → per-app verification. The interleaved
+    //     row order is what the customer asked for; chain integrity is
+    //     proved by re-grouping per app under the hood.
+    // chain_ok is the AND of every app's per-chain result (cross-app
+    // case) or the single chain's result (scoped case) — keeps the
+    // legacy boolean useful for "should I trust this slice" wire checks.
+    let chainOk;
+    let chainBreak = null;
+    let chainOkByApp = null;
+    if (scopedAppId !== null) {
+      const single = usage.verifyChain(rows);
+      chainOk = single.ok;
+      if (!single.ok) {
+        chainBreak = {
+          broke_at_index: single.broke_at_index,
+          reason: single.reason,
+        };
+      }
+      chainOkByApp = { [scopedAppId]: single.ok };
+    } else {
+      const perApp = usage.verifyByApp(rows);
+      chainOkByApp = {};
+      let firstBreak = null;
+      for (const [app, result] of Object.entries(perApp)) {
+        chainOkByApp[app] = result.ok;
+        if (!result.ok && firstBreak === null) {
+          firstBreak = {
+            app_id: app,
+            broke_at_index: result.broke_at_index,
+            reason: result.reason,
+          };
+        }
+      }
+      chainOk = Object.values(chainOkByApp).every(Boolean);
+      if (!chainOk) chainBreak = firstBreak;
+    }
     // next_cursor = ts (ms) of the last returned row, so the caller can
     // page forward by passing it back as `since`. Null when no rows
     // returned OR the slice didn't fill `limit` (no more rows to fetch).
@@ -345,11 +407,10 @@ function createApp() {
     res.json({
       rows,
       next_cursor: nextCursor,
-      chain_ok: chain.ok,
-      chain_break: chain.ok ? null : {
-        broke_at_index: chain.broke_at_index,
-        reason: chain.reason,
-      },
+      chain_ok: chainOk,
+      chain_break: chainBreak,
+      chain_ok_by_app: chainOkByApp,
+      app_id: scopedAppId, // echoes the scope; null = cross-app response
       server_time_ms: Date.now(),
     });
   });
@@ -369,7 +430,7 @@ function createApp() {
   //     persist only the public PEM + a stable keyId. No reusable customer
   //     auth material at rest on our side. Customer signs every request.
   app.post('/admin/keys', adminAuth, (req, res) => {
-    const { tenant_id, label, tier, scheme } = req.body || {};
+    const { tenant_id, app_id, label, tier, scheme } = req.body || {};
     if (!tenant_id) {
       return res.status(400).json({ error: { message: 'tenant_id required' } });
     }
@@ -381,8 +442,13 @@ function createApp() {
     }
     let issued;
     try {
+      // app_id partitions the customer's keyspace + audit chain +
+      // anomaly bucket. Null/undefined → keys.issue() defaults to
+      // '_default' (validated in src/keys.js — slug shape, max 64).
+      // Shape errors surface as 400.
       issued = keys.issue({
         tenantId: tenant_id,
+        app_id,
         label,
         tier,
         scheme: requestedScheme,
@@ -391,7 +457,9 @@ function createApp() {
       return res.status(400).json({ error: { message: e.message } });
     }
     const { plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id, record } = issued;
-    logger.info('key_issued', { id: record.id, tenant_id, tier, scheme: requestedScheme });
+    logger.info('key_issued', {
+      id: record.id, tenant_id, app_id: record.app_id, tier, scheme: requestedScheme,
+    });
 
     // Common response fields; the scheme-specific secrets are added below.
     // hmac_secret is on the common branch because every customer (regardless
@@ -401,6 +469,7 @@ function createApp() {
     const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
+      app_id: record.app_id,
       tier: record.tier,
       scheme: requestedScheme,
       issued_at: record.issued_at,

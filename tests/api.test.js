@@ -111,6 +111,51 @@ describe('admin: key issuance', () => {
 });
 
 // =============================================================================
+// /admin/keys app_id field — multi-app namespace
+// =============================================================================
+//
+// Each key is partitioned by (tenant_id, app_id). Omitting app_id at issue
+// time defaults to '_default' (the back-compat slot for pre-multi-app
+// callers). Bad app_id shape (capitals / spaces / >64 chars / non-slug
+// characters) → 400.
+describe('admin: app_id on key issuance', () => {
+  test('POST /admin/keys without app_id → record.app_id === "_default"', async () => {
+    const app = buildApp();
+    const body = await issueKey(app, 'tenant-x');
+    expect(body.app_id).toBe('_default');
+  });
+
+  test('POST /admin/keys with explicit app_id → record.app_id matches', async () => {
+    const app = buildApp();
+    const res = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-x', app_id: 'truthpulse' });
+    expect(res.status).toBe(201);
+    expect(res.body.app_id).toBe('truthpulse');
+  });
+
+  test('POST /admin/keys with bad-shape app_id (uppercase) → 400', async () => {
+    const app = buildApp();
+    const res = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-x', app_id: 'TruthPulse' });
+    expect(res.status).toBe(400);
+    expect(res.body.error.message).toMatch(/app_id/);
+  });
+
+  test('POST /admin/keys with app_id over 64 chars → 400', async () => {
+    const app = buildApp();
+    const res = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-x', app_id: 'a'.repeat(65) });
+    expect(res.status).toBe(400);
+  });
+});
+
+// =============================================================================
 // Bearer auth on /v1/* endpoints
 // =============================================================================
 describe('bearer auth on /v1/*', () => {

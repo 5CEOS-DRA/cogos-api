@@ -257,6 +257,10 @@ async function handleChatCompletions(req, res) {
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,
+      // app_id partitions the audit chain. Falls back to null →
+      // resolveAppId() in usage.js turns that into '_default' so a
+      // pre-multi-app key still records a concrete app on disk.
+      app_id: req.apiKey && req.apiKey.app_id,
       model,
       latency_ms: latency,
       status: 'upstream_error',
@@ -278,6 +282,7 @@ async function handleChatCompletions(req, res) {
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,
+      app_id: req.apiKey && req.apiKey.app_id,
       model,
       latency_ms: latencyMs,
       status: 'upstream_' + upstream.status,
@@ -302,6 +307,7 @@ async function handleChatCompletions(req, res) {
   usage.record({
     key_id: req.apiKey && req.apiKey.id,
     tenant_id: req.apiKey && req.apiKey.tenant_id,
+    app_id: req.apiKey && req.apiKey.app_id,
     model,
     prompt_tokens,
     completion_tokens,

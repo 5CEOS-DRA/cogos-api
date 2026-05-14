@@ -16,6 +16,38 @@ const KEYS_FILE = process.env.KEYS_FILE
 
 const PREFIX = 'sk-cogos-';
 
+// ---------------------------------------------------------------------------
+// Multi-app namespace (round 1 of customer-sealed audit).
+// ---------------------------------------------------------------------------
+// Every key carries an `app_id` tag. The (tenant_id, app_id) tuple is the
+// new partition key — each app gets its own audit chain head, its own
+// anomaly bucket, and its own slice of /v1/audit. Backward compatibility:
+// pre-multi-app records lack app_id; readers MUST treat NULL/missing as
+// the default app `_default`. There is NO migration to backfill — absent
+// is interpreted, not rewritten.
+const DEFAULT_APP_ID = '_default';
+const APP_ID_PATTERN = /^[a-z0-9_-]+$/;
+const APP_ID_MAX_LEN = 64;
+
+// Validate + normalize an app_id input. Returns DEFAULT_APP_ID for
+// null/undefined/empty. Throws on shape violations (slug-style only,
+// matches the same constraint we put on tenant_id implicitly throughout
+// the gateway). The DEFAULT_APP_ID leading underscore is allowed by the
+// regex; no further special-case needed.
+function normalizeAppId(input) {
+  if (input == null || input === '') return DEFAULT_APP_ID;
+  if (typeof input !== 'string') {
+    throw new Error('app_id must be a string');
+  }
+  if (input.length > APP_ID_MAX_LEN) {
+    throw new Error(`app_id exceeds ${APP_ID_MAX_LEN} chars`);
+  }
+  if (!APP_ID_PATTERN.test(input)) {
+    throw new Error('app_id must match [a-z0-9_-]+');
+  }
+  return input;
+}
+
 function ensureStore() {
   const dir = path.dirname(KEYS_FILE);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
@@ -80,6 +112,7 @@ function newEd25519KeyId() {
 // stays uniform.
 function issue({
   tenantId,
+  app_id = null,
   label = '',
   tier = 'starter',
   package_id = null,
@@ -90,6 +123,9 @@ function issue({
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
     throw new Error(`unknown scheme: ${scheme}`);
   }
+  // Validate-and-normalize. Null/undefined/empty all collapse to
+  // DEFAULT_APP_ID so callers who never pass app_id still get a sane tag.
+  const resolvedAppId = normalizeAppId(app_id);
   const hmac_secret = newHmacSecret();
 
   // Branch on scheme. Both branches produce a record + a return payload
@@ -124,6 +160,7 @@ function issue({
     pubkey_pem,                  // ed25519-only; null for bearer
     hmac_secret,                 // used to sign /v1/* responses; surfaced to caller below
     tenant_id: tenantId,
+    app_id: resolvedAppId,       // partition key for audit chain + anomaly + future RBAC
     label,
     tier,
     package_id,
@@ -157,7 +194,14 @@ function findByEd25519KeyId(keyId) {
   const records = readAll();
   const found = records.find((r) => r.ed25519_key_id === keyId);
   if (!found) return null;
-  return { ...found, key_hash: undefined };
+  // app_id read-time backfill: pre-multi-app records have no app_id.
+  // Treat absent as DEFAULT_APP_ID so downstream auth + audit logic
+  // never has to special-case null. We do NOT rewrite the file — the
+  // record on disk stays untagged, which keeps the original snapshot
+  // recoverable if the migration semantics ever need to change.
+  const out = { ...found, key_hash: undefined };
+  if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  return out;
 }
 
 // Touch last_used_at for an ed25519 record after a successful verification.
@@ -217,11 +261,36 @@ function verify(plaintext) {
     if (!found.hmac_secret) found.hmac_secret = newHmacSecret();
     writeAll(records);
   } catch (_e) { /* no-op */ }
-  return { ...found, key_hash: undefined };
+  const out = { ...found, key_hash: undefined };
+  // app_id read-time backfill: pre-multi-app records have no app_id.
+  // Treat absent as DEFAULT_APP_ID so chat-api can always pass a
+  // concrete app_id to usage.record() without a null-coalesce on every
+  // hot-path request.
+  if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  return out;
 }
 
-function list() {
-  return readAll().map((r) => ({ ...r, key_hash: undefined }));
+function list({ tenant_id, app_id } = {}) {
+  // Optional (tenant_id, app_id) filter for the multi-app browse story.
+  // app_id alone is rejected (would cross-tenant) — callers must scope
+  // to a tenant first. tenant_id alone returns every app for that tenant.
+  // No-arg call keeps the original "list everything" semantics for the
+  // operator-only /admin/keys surface.
+  let rows = readAll();
+  if (tenant_id) {
+    rows = rows.filter((r) => r.tenant_id === tenant_id);
+    if (app_id != null) {
+      const wanted = normalizeAppId(app_id);
+      rows = rows.filter((r) => (r.app_id || DEFAULT_APP_ID) === wanted);
+    }
+  } else if (app_id != null) {
+    throw new Error('app_id filter requires tenant_id');
+  }
+  return rows.map((r) => {
+    const out = { ...r, key_hash: undefined };
+    if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+    return out;
+  });
 }
 
 function revoke(id) {
@@ -243,5 +312,7 @@ module.exports = {
   updateStripeStatus,
   findByEd25519KeyId,
   touchLastUsed,
+  normalizeAppId,
   PREFIX,
+  DEFAULT_APP_ID,
 };

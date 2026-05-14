@@ -203,18 +203,23 @@ function emitAnomaly(event) {
   logger.warn('anomaly_detected', event);
 }
 
+// kind → (counters-key, threshold-key) lookup. Kept as a constant so the
+// mapping is explicit; the fire() event names are the operator-facing
+// vocabulary, while the counters[] keys are the internal signal slots.
+const KIND_TO_SIGNAL = Object.freeze({
+  auth_brute_force_suspected: { counter: 'auth_4xx', thresholdKey: 'auth_4xx' },
+  scanner_active:             { counter: 'honeypot', thresholdKey: 'honeypot' },
+  schema_failure_spike:       { counter: 'schema_violation', thresholdKey: 'schema_violation' },
+});
+
 function fire(bucket, kind, severity, now, contextExtra) {
   // Suppress re-fires within the same window.
   const last = bucket.fired[kind] || 0;
   if (last > 0 && now - last < WINDOW_MS) return false;
   bucket.fired[kind] = now;
-  const count = (bucket.counters[kind] || []).length;
-  const threshold = THRESHOLDS[
-    kind === 'auth_brute_force_suspected' ? 'auth_4xx'
-      : kind === 'scanner_active' ? 'honeypot'
-        : kind === 'schema_failure_spike' ? 'schema_violation'
-          : 'auth_4xx' // default — never hit; latency uses emitAnomaly direct
-  ];
+  const m = KIND_TO_SIGNAL[kind];
+  const count = m ? (bucket.counters[m.counter] || []).length : 0;
+  const threshold = m ? THRESHOLDS[m.thresholdKey] : 0;
   emitAnomaly({
     ts: new Date(now).toISOString(),
     kind,

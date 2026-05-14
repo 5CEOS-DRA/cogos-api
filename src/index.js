@@ -16,6 +16,7 @@ const whitepaper = require('./whitepaper');
 const demo = require('./demo');
 const cookbook = require('./cookbook');
 const honeypot = require('./honeypot');
+const anomaly = require('./anomaly');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -59,14 +60,26 @@ const COPY_JS = `(function(){
 function createApp() {
   const app = express();
   app.disable('x-powered-by'); // don't advertise framework/version
+  app.set('trust proxy', 1);
   app.use(securityHeaders);
 
-  // Honeypot middleware. Mounted EARLY — after securityHeaders so the
-  // CSP/HSTS still apply to fake responses, but before the JSON body
-  // parser and before every real route. Intercepts scanner-target
-  // paths (/.env, /.git/*, /wp-admin, /api/v0/*, etc) and returns
-  // plausible-looking-but-obviously-canary responses. Every hit is
-  // logged at WARN level. See src/honeypot.js for the path table.
+  // Anomaly detector — Security Hardening Card #5, SHADOW MODE.
+  //
+  // Mounted FIRST in the data path (after securityHeaders, before honeypot)
+  // so res.on('finish') is registered on EVERY request — including those
+  // that honeypot terminates without calling next(). The observer reads
+  // the final response status code, the resolved req.ip (trust proxy is
+  // set above), and req.apiKey (when bearerAuth sets it later on
+  // /v1/* routes). Shadow mode: this middleware never alters the response.
+  app.use(anomaly);
+
+  // Honeypot middleware. Mounted EARLY — after securityHeaders + anomaly
+  // observer so the CSP/HSTS still apply to fake responses and the anomaly
+  // detector sees the hit, but before the JSON body parser and before every
+  // real route. Intercepts scanner-target paths (/.env, /.git/*, /wp-admin,
+  // /api/v0/*, etc) and returns plausible-looking-but-obviously-canary
+  // responses. Every hit is logged at WARN level. See src/honeypot.js for
+  // the path table.
   app.use(honeypot);
 
   app.get('/js/copy.js', (_req, res) => {
@@ -108,7 +121,6 @@ function createApp() {
 
   // All other endpoints use parsed JSON.
   app.use(express.json({ limit: '512kb' }));
-  app.set('trust proxy', 1);
 
   // ---- Public health (no auth) ----
   // Content-negotiated: browsers get an HTML heartbeat page with a

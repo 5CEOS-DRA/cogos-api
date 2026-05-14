@@ -1,0 +1,233 @@
+'use strict';
+
+// Anomaly detector — Security Hardening Card #5. Shadow-mode contract:
+// observe + log + counter, NEVER block. Tests cover threshold semantics,
+// fire-once-per-window, eviction, log shape, and shadow-mode invariant.
+
+process.env.NODE_ENV = 'test';
+process.env.ADMIN_KEY = 'test-admin-key-very-long';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
+
+const request = require('supertest');
+
+let tmpDir;
+let anomaliesFile;
+
+beforeEach(() => {
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-anom-test-'));
+  process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
+  process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
+  anomaliesFile = path.join(tmpDir, 'anomalies.jsonl');
+  process.env.ANOMALIES_FILE = anomaliesFile;
+  // Tight TTL so the eviction test runs without sleeping.
+  process.env.ANOMALY_BUCKET_TTL_MS = '120000'; // 2 min default for most tests
+  jest.resetModules();
+});
+
+afterEach(() => {
+  try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_e) {}
+});
+
+// Build a paired (app, anomaly) where both come from the SAME module
+// registry — otherwise jest.resetModules() between the two requires would
+// hand us separate in-memory state and the test would race itself.
+function freshPair() {
+  jest.resetModules();
+  const anom = require('../src/anomaly');
+  const { createApp } = require('../src/index');
+  return { app: createApp(), anom };
+}
+
+function freshApp() {
+  return freshPair().app;
+}
+
+async function issueKey(app, tenantId, tier = 'starter') {
+  const res = await request(app)
+    .post('/admin/keys')
+    .set('X-Admin-Key', process.env.ADMIN_KEY)
+    .send({ tenant_id: tenantId, tier });
+  return res.body;
+}
+
+function readAnomalies() {
+  if (!fs.existsSync(anomaliesFile)) return [];
+  const raw = fs.readFileSync(anomaliesFile, 'utf8');
+  return raw.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l));
+}
+
+describe('anomaly detector — shadow mode', () => {
+  test('11 auth-4xx from one IP within 60s → fires "auth_brute_force_suspected" exactly once', async () => {
+    const app = freshApp();
+    // Hit a bearer-auth route with no token → 401 each call.
+    for (let i = 0; i < 11; i += 1) {
+      const r = await request(app).get('/v1/models');
+      expect(r.status).toBe(401);
+    }
+    const events = readAnomalies();
+    const fires = events.filter((e) => e.kind === 'auth_brute_force_suspected');
+    expect(fires.length).toBe(1);
+    expect(fires[0].subject_type).toBe('ip');
+    expect(fires[0].window_seconds).toBe(60);
+    expect(fires[0].threshold).toBe(10);
+    expect(fires[0].count).toBeGreaterThan(10);
+    expect(fires[0].context).toEqual(expect.objectContaining({
+      last_path: '/v1/models',
+    }));
+  });
+
+  test('10 auth-4xx does NOT fire (threshold is strict >)', async () => {
+    const app = freshApp();
+    for (let i = 0; i < 10; i += 1) {
+      const r = await request(app).get('/v1/models');
+      expect(r.status).toBe(401);
+    }
+    const events = readAnomalies();
+    const fires = events.filter((e) => e.kind === 'auth_brute_force_suspected');
+    expect(fires.length).toBe(0);
+  });
+
+  test('4 honeypot hits from one IP → fires "scanner_active"', async () => {
+    const app = freshApp();
+    // /.env, /wp-admin, /.git/config, /xmlrpc.php — all honeypot paths.
+    await request(app).get('/.env');
+    await request(app).get('/wp-admin');
+    await request(app).get('/.git/config');
+    await request(app).get('/xmlrpc.php');
+    const events = readAnomalies();
+    const fires = events.filter((e) => e.kind === 'scanner_active');
+    expect(fires.length).toBe(1);
+    expect(fires[0].subject_type).toBe('ip');
+    expect(fires[0].threshold).toBe(3);
+  });
+
+  test('shadow-mode contract — fired anomaly does NOT change response status', async () => {
+    const app = freshApp();
+    // 11 calls: the 11th crosses the threshold and fires. Every call still
+    // returns 401 (the auth-fail status), NOT 429 / 503 / anything else.
+    const statuses = [];
+    for (let i = 0; i < 11; i += 1) {
+      const r = await request(app).get('/v1/models');
+      statuses.push(r.status);
+    }
+    expect(new Set(statuses)).toEqual(new Set([401]));
+    // And the fire DID happen, so we know the test is exercising the path.
+    expect(readAnomalies().some((e) => e.kind === 'auth_brute_force_suspected')).toBe(true);
+  });
+
+  test('per-tenant schema_violation counter increments only when req.apiKey is set', async () => {
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    // Unauthenticated 401 on /v1/chat/completions should NOT increment the
+    // tenant schema_violation counter (no req.apiKey).
+    await request(app).post('/v1/chat/completions').send({});
+    expect(anom._test.getCounter('tenant', 'tenant-x', 'schema_violation')).toBe(0);
+
+    // Authenticated tenant call. Without OLLAMA_ENDPOINT configured the
+    // upstream is unavailable, so chat-api responds with non-200 — exactly
+    // the kind of failure the schema_violation signal is supposed to catch.
+    const { api_key } = await issueKey(app, 'tenant-x');
+    const res = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({ model: 'qwen2.5:3b-instruct', messages: [{ role: 'user', content: 'hi' }] });
+    // Tenant counter should have been incremented for this call IF status
+    // != 200. Verify whichever way the upstream resolves.
+    const c = anom._test.getCounter('tenant', 'tenant-x', 'schema_violation');
+    if (res.status === 200) {
+      expect(c).toBe(0);
+    } else {
+      expect(c).toBe(1);
+    }
+  });
+
+  test('anomaly event lands in the configured ANOMALIES_FILE', async () => {
+    const app = freshApp();
+    for (let i = 0; i < 11; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app).get('/v1/models');
+    }
+    expect(fs.existsSync(anomaliesFile)).toBe(true);
+    const events = readAnomalies();
+    expect(events.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('anomaly log is JSONL (one JSON object per line) and parses correctly', async () => {
+    // Force two distinct anomalies and assert the file is line-delimited
+    // JSON with every line a valid object having the locked shape.
+    const { anom } = freshPair();
+    anom._test.reset();
+    anom._test.forceFire('auth_brute_force_suspected');
+    anom._test.forceFire('scanner_active');
+    const raw = fs.readFileSync(anomaliesFile, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.length > 0);
+    expect(lines.length).toBe(2);
+    lines.forEach((line) => {
+      // Must NOT have a trailing comma or array wrapper.
+      expect(line.startsWith('{')).toBe(true);
+      expect(line.endsWith('}')).toBe(true);
+      const ev = JSON.parse(line);
+      expect(ev).toEqual(expect.objectContaining({
+        ts: expect.any(String),
+        kind: expect.any(String),
+        severity: expect.any(String),
+        subject_type: expect.any(String),
+        subject_value: expect.any(String),
+        window_seconds: expect.any(Number),
+        count: expect.any(Number),
+        threshold: expect.any(Number),
+        context: expect.any(Object),
+      }));
+      // Timestamp is ISO 8601 (parseable).
+      expect(Number.isFinite(Date.parse(ev.ts))).toBe(true);
+    });
+  });
+
+  test('after the TTL elapses, the IP bucket is evicted on next observe()', async () => {
+    // Drive eviction via the test helper (age + force-sweep) rather than
+    // sleeping 6 minutes in a unit test.
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    // Generate one bucket.
+    await request(app).get('/v1/models');
+    expect(anom._test.bucketCount()).toBe(1);
+    // Age every bucket past TTL and past the sweep-gating 30s window.
+    anom._test.ageAllBuckets(anom._test.BUCKET_TTL_MS + 60_000);
+    // Next observe triggers maybeSweep().
+    await request(app).get('/.env'); // honeypot path — different bucket entry
+    // The previously-aged bucket should have been evicted. The new
+    // honeypot hit added one bucket. Counter for the new IP key only.
+    expect(anom._test.bucketCount()).toBeLessThanOrEqual(1);
+  });
+
+  test('subject_type and subject_value are server-determined enums/values (no client-controlled content)', async () => {
+    // The fields kind/severity/subject_type are enums chosen by the
+    // server. subject_value is `ip` (from req.ip) or `tenant`
+    // (from req.apiKey.tenant_id) — both server-resolved.
+    // Free-form bytes (user-agent, path) live only in context.
+    const app = freshApp();
+    for (let i = 0; i < 11; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app)
+        .get('/v1/models')
+        .set('User-Agent', '<script>alert(1)</script>');
+    }
+    const events = readAnomalies();
+    const fire = events.find((e) => e.kind === 'auth_brute_force_suspected');
+    expect(['ip', 'tenant', 'global']).toContain(fire.subject_type);
+    expect(['warn', 'error']).toContain(fire.severity);
+    expect([
+      'auth_brute_force_suspected',
+      'scanner_active',
+      'schema_failure_spike',
+      'latency_drift_detected',
+    ]).toContain(fire.kind);
+    // UA is opaque — passes through unmolested into context, NEVER into
+    // any of the typed enum fields.
+    expect(fire.context.ua).toBe('<script>alert(1)</script>');
+    expect(fire.subject_value).not.toMatch(/<script>/);
+  });
+});

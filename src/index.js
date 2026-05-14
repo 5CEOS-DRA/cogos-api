@@ -4,7 +4,7 @@ require('dotenv').config();
 const express = require('express');
 
 const logger = require('./logger');
-const { bearerAuth, adminAuth } = require('./auth');
+const { customerAuth, adminAuth } = require('./auth');
 const { handleChatCompletions, handleListModels, enforcePackage } = require('./chat-api');
 const keys = require('./keys');
 const usage = require('./usage');
@@ -106,8 +106,14 @@ function createApp() {
       }
     });
 
-  // All other endpoints use parsed JSON.
-  app.use(express.json({ limit: '512kb' }));
+  // All other endpoints use parsed JSON. The `verify` hook stashes the
+  // raw bytes onto req.rawBody so the ed25519 middleware can recompute
+  // sha256(body) for signature verification. Express 5's json parser
+  // otherwise discards the source buffer once it has the parsed object.
+  app.use(express.json({
+    limit: '512kb',
+    verify: (req, _res, buf) => { req.rawBody = buf; },
+  }));
   app.set('trust proxy', 1);
 
   // ---- Public health (no auth) ----
@@ -238,8 +244,11 @@ function createApp() {
   });
 
   // ---- Public chat-completions surface ----
-  app.get('/v1/models', bearerAuth, handleListModels);
-  app.post('/v1/chat/completions', bearerAuth, enforcePackage, handleChatCompletions);
+  // customerAuth = ed25519-first, bearer-fallback. Either scheme attaches
+  // req.apiKey on success; the chained handlers read req.apiKey.tenant_id
+  // without caring which substrate authenticated the request.
+  app.get('/v1/models', customerAuth, handleListModels);
+  app.post('/v1/chat/completions', customerAuth, enforcePackage, handleChatCompletions);
 
   // ---- Customer-facing audit query (Security Hardening Card #3) ----
   // Returns the requesting tenant's hash-chained usage rows. Strictly
@@ -255,7 +264,7 @@ function createApp() {
   // The public `/audit/checkpoint/<ts>` endpoint and Azure Blob
   // integration are intentionally NOT built in this branch — they're
   // a separate card in SECURITY_HARDENING_PLAN.md.
-  app.get('/v1/audit', bearerAuth, (req, res) => {
+  app.get('/v1/audit', customerAuth, (req, res) => {
     const sinceMs = Number(req.query.since || 0);
     const limitRaw = Number(req.query.limit || 100);
     if (!Number.isFinite(sinceMs) || sinceMs < 0) {

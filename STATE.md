@@ -100,10 +100,18 @@ Not yet set but supported by the code:
 
 ## What's in `main` but not yet exercised in prod
 
-Nothing significant — everything in `main` as of `c9f4bc3` is live on revision `0000025`. The two follow-ups are:
+Nothing significant — everything in `main` as of `c9f4bc3` is live on revision `0000025`. The follow-ups are:
 
 1. **Cosign sign-on-deploy** — the deploy script's signing step is in place but `COSIGN_KEY_FILE` isn't set on the deployer's machine for the next deploy. Set `export COSIGN_KEY_FILE=$PWD/cosign.key` (or pull from KV) before the next `bash scripts/deploy-update.sh` and images start getting signed.
-2. **Anomaly detector** is in shadow mode — collecting fingerprints, never blocking. Needs ~1 week of real-traffic data before a future card flips it to fail-closed.
+2. **Rate limit + anomaly fail-closed (v17, pentest F2 closure)** — both layers land in the next image, but `ANOMALY_FAIL_CLOSED=1` stays unset until ~1 week of shadow-mode telemetry confirms the default thresholds (auth_4xx > 10/min/IP, honeypot > 3/min/IP) don't false-positive legitimate traffic. The per-IP token-bucket (100/min global, 30/min `/admin/*`) and per-tenant bucket (1000/min on `/v1/*`) are **on by default** the moment v17 ships — they're cheap and conservative.
+
+---
+
+## Pentest findings — closed
+
+| Finding | Severity | Closed in | How |
+|---|---|---|---|
+| F2: No application-layer rate limiting | MEDIUM | v17 (2026-05-14) | Two-layer defence: (a) explicit token-bucket rate limiter `src/rate-limit.js` mounted per-IP (100/min global, 30/min `/admin/*`) and per-tenant (1000/min on `/v1/*`); (b) anomaly detector `src/anomaly.js` flipped to fail-closed under `ANOMALY_FAIL_CLOSED=1`, where `auth_brute_force_suspected` fires a 5-min IP ban and `scanner_active` fires a 15-min ban that `rateLimitByIp` consults via `anomaly.isBlocked()`. Schema-violation and latency-drift signals stay log-only — they're per-tenant/global signals that would punish paying customers for upstream blips. 429 carries `Retry-After`. |
 
 ---
 
@@ -120,7 +128,6 @@ Nothing significant — everything in `main` as of `c9f4bc3` is live on revision
 | Item | Scope | Blocker |
 |---|---|---|
 | Public hash-chain head checkpoint endpoint | Add `GET /audit/checkpoint/latest`, optionally publish to Azure Blob hourly via Container App Job | None — straightforward; just hasn't shipped |
-| Anomaly detector fail-closed flip | Add a second middleware reading `blockedUntilMs` set by `fire()`; respect threshold without blocking shadow path | Needs ~1 week real-traffic data to calibrate thresholds without false-positive DoS |
 | Isolate-per-request (Week 4) | WASM/Wasmtime port of `src/chat-api.js` handler; runs in fresh isolate per request, no persistent state, no host syscall surface | ~1 focused week of work; not parallelizable |
 | Cookbook recipe for Ed25519 signing | Python + Node recipe added to `/cookbook`, anchor `#ed25519-sign` | Small follow-up; SDK examples |
 | Customer-side audit-verify Python script | Lives in `llm-determinism-bench` repo (not cogos-api); replays a tenant's audit slice + verifies chain | Separate repo, separate session |

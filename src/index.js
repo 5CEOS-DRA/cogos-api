@@ -480,7 +480,10 @@ function createApp() {
     } catch (e) {
       return res.status(400).json({ error: { message: e.message } });
     }
-    const { plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id, record } = issued;
+    const {
+      plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id,
+      x25519_private_pem, x25519_pubkey_pem, record,
+    } = issued;
     logger.info('key_issued', {
       id: record.id, tenant_id, app_id: record.app_id, tier, scheme: requestedScheme,
     });
@@ -509,6 +512,15 @@ function createApp() {
       response.ed25519_key_id = ed25519_key_id;
       response.private_pem = private_pem;
       response.pubkey_pem = pubkey_pem;
+      // x25519 sealing keypair: customer holds the private PEM and
+      // uses it to decrypt sealed_content envelopes on /v1/audit rows.
+      // The pubkey is also returned for the customer to verify the
+      // value the server retained matches what they hold.
+      response.x25519_private_pem = x25519_private_pem;
+      response.x25519_pubkey_pem = x25519_pubkey_pem;
+      response.warning = 'Save api material now. private_pem (auth) '
+        + 'and x25519_private_pem (audit decryption) will not be shown '
+        + 'again — they are NOT stored server-side.';
     }
     res.status(201).json(response);
   });

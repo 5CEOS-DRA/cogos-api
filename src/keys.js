@@ -110,6 +110,22 @@ function newEd25519KeyId() {
 // to null and instead carries { scheme:'ed25519', ed25519_key_id, pubkey_pem }.
 // hmac_secret is issued for both schemes so the response-signing path
 // stays uniform.
+//
+// SEALING KEYPAIR (customer-sealed audit, sibling of ed25519 scheme).
+// At ed25519 issuance time we ALSO generate an independent X25519
+// keypair. We persist only the X25519 public PEM (so usage.record can
+// seal new rows for this customer) and return the X25519 private PEM
+// to the caller ONCE alongside the ed25519 private. Ed25519 and X25519
+// are different curves — auth signing uses ed25519, audit decryption
+// uses x25519. Node 20 stdlib does NOT expose
+// crypto.convertEd25519PublicKey, and the seed-level convertibility
+// trick is fragile across minor versions, so we ship two independent
+// keypairs. The cost is one extra PEM in the issuance response; the
+// benefit is no fragile curve-conversion shim.
+//
+// Bearer-scheme keys are NOT issued an x25519 keypair. A bearer
+// customer's audit rows stay cleartext (sealed:false), which matches
+// the doctrine that sealing is opt-in via the ed25519 scheme.
 function issue({
   tenantId,
   app_id = null,
@@ -136,6 +152,9 @@ function issue({
   let ed25519_key_id = null;
   let key_hash = null;
   let key_prefix = null;
+  // Sealing keypair (x25519). Only generated for ed25519-scheme keys.
+  let x25519_private_pem = null;
+  let x25519_pubkey_pem = null;
 
   if (scheme === 'bearer') {
     plaintext = newKeyPlaintext();
@@ -149,6 +168,13 @@ function issue({
     pubkey_pem = publicKey.export({ type: 'spki', format: 'pem' });
     private_pem = privateKey.export({ type: 'pkcs8', format: 'pem' });
     ed25519_key_id = newEd25519KeyId();
+
+    // X25519: independent sealing keypair (see header comment). Only
+    // the public PEM is persisted; the private is returned to the
+    // caller ONCE and is never reachable from the server afterward.
+    const x = crypto.generateKeyPairSync('x25519');
+    x25519_pubkey_pem = x.publicKey.export({ type: 'spki', format: 'pem' });
+    x25519_private_pem = x.privateKey.export({ type: 'pkcs8', format: 'pem' });
   }
 
   const record = {
@@ -158,6 +184,7 @@ function issue({
     key_prefix,                  // bearer-only; null for ed25519
     ed25519_key_id,              // ed25519-only; null for bearer
     pubkey_pem,                  // ed25519-only; null for bearer
+    x25519_pubkey_pem,           // ed25519-only sealing pubkey; null for bearer
     hmac_secret,                 // used to sign /v1/* responses; surfaced to caller below
     tenant_id: tenantId,
     app_id: resolvedAppId,       // partition key for audit chain + anomaly + future RBAC
@@ -177,9 +204,11 @@ function issue({
   writeAll(records);
   return {
     plaintext,                    // null for ed25519
-    private_pem,                  // null for bearer
-    pubkey_pem,                   // null for bearer
+    private_pem,                  // null for bearer (ed25519 auth-signing private)
+    pubkey_pem,                   // null for bearer (ed25519 auth-signing public)
     ed25519_key_id,               // null for bearer
+    x25519_private_pem,           // null for bearer (sealing/decryption private)
+    x25519_pubkey_pem,            // null for bearer (sealing/encryption public)
     hmac_secret,
     record: { ...record, key_hash: undefined, hmac_secret: undefined },
   };

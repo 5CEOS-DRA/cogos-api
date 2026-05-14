@@ -58,6 +58,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const sealedAudit = require('./sealed-audit');
 
 const USAGE_FILE = process.env.USAGE_FILE
   || path.join(__dirname, '..', 'data', 'usage.jsonl');
@@ -161,6 +162,21 @@ function findTenantHead(tenantId) {
   return findHead(tenantId, DEFAULT_APP_ID);
 }
 
+// Append a usage row. Customer-content-sensitive fields (request_id,
+// prompt_fingerprint, schema_name) are sealed under the customer's
+// X25519 public key when one is supplied via `x25519_pubkey_pem`. When
+// no x25519 pubkey is present (bearer-only customers), those fields
+// stay in cleartext slots on the row and `sealed: false` is recorded
+// so the customer + future auditors know unambiguously whether each
+// row was sealed at write-time.
+//
+// LOAD-BEARING NOTE: the chain hashes the row WITH its sealed fields
+// as they appear on disk (encrypted bytes are still bytes). That means
+// sealing toggling for the same logical event still produces a
+// deterministic row_hash — the only requirement is that the CANONICAL
+// chain payload fields (ts, tenant_id, key_id, route, status,
+// prompt/completion tokens, latency, prev_hash, app_id) are all
+// cleartext, which they are. Sealing does NOT change canonicalChainPayload().
 function record({
   key_id,
   tenant_id,
@@ -172,7 +188,14 @@ function record({
   status = 'success',
   schema_enforced = false,
   request_id,
+  prompt_fingerprint = null,
+  schema_name = null,
   route = '/v1/chat/completions',
+  // X25519 SPKI PEM bound to (tenant_id, app_id) at issuance. When
+  // present + valid the content fields ride inside an envelope only
+  // the customer can open. Bearer-only customers don't have one and
+  // the row stays cleartext (with sealed:false).
+  x25519_pubkey_pem = null,
 }) {
   ensureFile();
   const ts = new Date().toISOString();
@@ -186,7 +209,41 @@ function record({
     prompt_tokens, completion_tokens, latency_ms, prev_hash,
     app_id: resolvedAppId,
   }));
-  const line = JSON.stringify({
+
+  // Decide sealing. We require both (a) a valid x25519 pubkey AND (b)
+  // at least one content field to actually seal. Sealing an empty
+  // payload would still produce a valid envelope but it's pointless
+  // ciphertext + ~150B per row; we save the bytes for the bearer-only
+  // path which has nothing customer-sensitive to hide anyway.
+  const hasContent = (request_id != null && request_id !== '')
+    || (prompt_fingerprint != null && prompt_fingerprint !== '')
+    || (schema_name != null && schema_name !== '');
+  const shouldSeal = hasContent && sealedAudit.isSealablePubkey(x25519_pubkey_pem);
+
+  let sealed = false;
+  let sealedContent = undefined;
+  let cleartextRequestId = request_id;
+  let cleartextPromptFp = prompt_fingerprint;
+  let cleartextSchemaName = schema_name;
+
+  if (shouldSeal) {
+    const payload = sealedAudit.canonicalContent({
+      request_id, prompt_fingerprint, schema_name,
+    });
+    // AAD binds the envelope to this specific (tenant, app, ts) — a
+    // copy-paste of the sealed_content blob onto a different row fails
+    // the GCM tag check at unseal time.
+    sealedContent = sealedAudit.sealForPubkey(x25519_pubkey_pem, payload, {
+      tenant_id, app_id: resolvedAppId, ts,
+    });
+    sealed = true;
+    // Strip cleartext content fields so they don't double-live on disk.
+    cleartextRequestId = null;
+    cleartextPromptFp = null;
+    cleartextSchemaName = null;
+  }
+
+  const row = {
     ts,
     key_id,
     tenant_id,
@@ -198,12 +255,22 @@ function record({
     latency_ms,
     status,
     schema_enforced,
-    request_id,
+    request_id: cleartextRequestId,
     route,
     prev_hash,
     row_hash,
-  }) + '\n';
-  fs.appendFileSync(USAGE_FILE, line);
+    sealed,
+  };
+  // Only attach the content fields when sealing was skipped (preserves
+  // the legacy on-disk shape for unsealed rows + avoids redundant null
+  // entries on sealed rows).
+  if (!sealed) {
+    if (prompt_fingerprint != null) row.prompt_fingerprint = cleartextPromptFp;
+    if (schema_name != null) row.schema_name = cleartextSchemaName;
+  } else {
+    row.sealed_content = sealedContent;
+  }
+  fs.appendFileSync(USAGE_FILE, JSON.stringify(row) + '\n');
 }
 
 function readAll() {
@@ -233,9 +300,16 @@ function readSlice({ tenant_id, app_id, since, limit } = {}) {
   const lim = limit == null ? 100 : Math.max(0, Math.floor(Number(limit) || 0));
   const wantedApp = app_id == null ? null : resolveAppId(app_id);
   const all = readAll().filter((r) => r.tenant_id === tenant_id);
-  const projected = all.map((r) => (
-    r.app_id == null ? { ...r, app_id: DEFAULT_APP_ID } : r
-  ));
+  // Read-time projection:
+  //   - app_id absent  → DEFAULT_APP_ID (pre-multi-app history)
+  //   - sealed absent  → false (pre-sealed-audit history; cleartext content)
+  // Disk shape is NOT rewritten; the projection only smooths the API
+  // surface so downstream consumers can rely on these fields being set.
+  const projected = all.map((r) => {
+    const out = r.app_id == null ? { ...r, app_id: DEFAULT_APP_ID } : r;
+    if (out.sealed == null) return { ...out, sealed: false };
+    return out;
+  });
   const appFiltered = wantedApp == null
     ? projected
     : projected.filter((r) => r.app_id === wantedApp);

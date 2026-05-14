@@ -65,4 +65,31 @@ describe('honeypot middleware', () => {
     // Landing page is real HTML — should not carry the honeypot canary.
     expect(res.text).not.toMatch(/HONEYPOT_TOKEN_REPORT_TO_SECURITY/);
   });
+
+  // Pentest finding 2026-05-14: scanners try trivial path variations
+  // (mixed-case, trailing slash) and were getting a real 404, leaking
+  // signal. Normalize before lookup so the trap fires consistently.
+  test.each([
+    '/.ENV',
+    '/.Env',
+    '/.env/',
+    '/WP-ADMIN',
+    '/wp-Admin',
+    '/Backup.SQL',
+    '/.AWS/credentials',
+    '/.Git/Config',
+  ])('honeypot variant %s still trips the trap (200)', async (p) => {
+    const app = createApp();
+    const res = await request(app).get(p);
+    expect(res.status).toBe(200);
+  });
+
+  test.each([
+    '/API/v0/foo',
+    '/api/V2/anything',
+  ])('honeypot API-version variant %s returns 401', async (p) => {
+    const app = createApp();
+    const res = await request(app).get(p);
+    expect(res.status).toBe(401);
+  });
 });

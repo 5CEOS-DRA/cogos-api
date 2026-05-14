@@ -230,9 +230,20 @@ const EXACT = {
 // enough to be ambiguous without burning the canary.
 const FAKE_API_VERSIONS = /^\/api\/v(0|2|3)(\/|$)/;
 
+// Normalize path before honeypot lookup so trivial scanner variations
+// (mixed-case, trailing slash) all trip the trap. Pentest finding
+// 2026-05-14: `/.ENV`, `/Wp-Admin`, `/.env/` previously bypassed the
+// honeypot and got a real 404, leaking signal to systematic scanners.
+function normalizePath(p) {
+  let n = String(p || '/');
+  if (n.length > 1 && n.endsWith('/')) n = n.slice(0, -1);
+  return n.toLowerCase();
+}
+
 function isHoneypotPath(p) {
-  if (Object.prototype.hasOwnProperty.call(EXACT, p)) return true;
-  if (FAKE_API_VERSIONS.test(p)) return true;
+  const n = normalizePath(p);
+  if (Object.prototype.hasOwnProperty.call(EXACT, n)) return true;
+  if (FAKE_API_VERSIONS.test(n)) return true;
   return false;
 }
 
@@ -247,10 +258,11 @@ function honeypot(req, res, next) {
     method: req.method,
   });
 
-  if (FAKE_API_VERSIONS.test(p)) {
+  const n = normalizePath(p);
+  if (FAKE_API_VERSIONS.test(n)) {
     return sendJson(res, 401, { error: 'invalid token' });
   }
-  const handler = EXACT[p];
+  const handler = EXACT[n];
   return handler(req, res);
 }
 

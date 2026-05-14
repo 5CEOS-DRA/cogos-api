@@ -304,6 +304,59 @@ All recipes assume <code>COGOS_API_KEY</code> is set in your env. If you don&apo
 
 <hr>
 
+<h2 id="verify-signature">Verify a response signature</h2>
+
+<div class="recipe">
+<p>Every <code>/v1/*</code> response carries an <code>X-Cogos-Signature</code> header: <code>HMAC-SHA256(hmac_secret, raw_response_body)</code> in lowercase hex. Re-compute it on your side and compare with constant-time equality. If it doesn&apos;t match, the body was tampered with in transit &mdash; reject the response.</p>
+
+<p>Your HMAC secret is displayed once, alongside your API key, on the post-checkout success page. Store it the same way you store the API key.</p>
+
+<pre><span class="code-label">python</span><code>import hmac, hashlib, requests
+
+API_KEY = os.environ["COGOS_API_KEY"]
+HMAC_SECRET = os.environ["COGOS_HMAC_SECRET"]
+
+r = requests.post(
+  "https://cogos.5ceos.com/v1/chat/completions",
+  headers={"Authorization": f"Bearer {API_KEY}"},
+  json={"model":"cogos-tier-b","messages":[{"role":"user","content":"hi"}]},
+)
+
+raw = r.content  # bytes, NOT r.text — must be the exact bytes the server signed
+expected = hmac.new(HMAC_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+got = r.headers["X-Cogos-Signature"]
+
+if not hmac.compare_digest(expected, got):
+    raise RuntimeError("response signature mismatch — reject")
+
+data = r.json()</code></pre>
+
+<pre><span class="code-label">node</span><code>import crypto from "node:crypto";
+
+const r = await fetch("https://cogos.5ceos.com/v1/chat/completions", {
+  method: "POST",
+  headers: {
+    "Authorization": \`Bearer \${process.env.COGOS_API_KEY}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ model: "cogos-tier-b", messages: [{ role: "user", content: "hi" }] }),
+});
+
+const raw = Buffer.from(await r.arrayBuffer());
+const expected = crypto.createHmac("sha256", process.env.COGOS_HMAC_SECRET).update(raw).digest("hex");
+const got = r.headers.get("x-cogos-signature");
+
+const ok = expected.length === got.length &&
+  crypto.timingSafeEqual(Buffer.from(expected, "hex"), Buffer.from(got, "hex"));
+if (!ok) throw new Error("response signature mismatch — reject");
+
+const data = JSON.parse(raw.toString("utf8"));</code></pre>
+
+<div class="lesson">Lesson: sign the <em>bytes</em>, not the parsed JSON. Re-serializing changes whitespace and key order, and the HMAC won&apos;t match. Always compare with <code>hmac.compare_digest</code> / <code>crypto.timingSafeEqual</code>; <code>==</code> leaks length-prefix information through timing.</div>
+</div>
+
+<hr>
+
 <h2>Patterns we deliberately don&apos;t show</h2>
 
 <p>

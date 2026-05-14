@@ -23,6 +23,21 @@ const axios = require('axios');
 const logger = require('./logger');
 const usage = require('./usage');
 const packages = require('./packages');
+const cryptoSign = require('./crypto-sign');
+
+// Send a JSON response with X-Cogos-Signature when an HMAC secret is
+// available on the bound API key. Customer can verify by recomputing
+// HMAC-SHA256(hmac_secret, raw_response_body) on their side.
+function sendSignedJson(req, res, body) {
+  const hmacSecret = req.apiKey && req.apiKey.hmac_secret;
+  const bodyBytes = JSON.stringify(body);
+  if (hmacSecret) {
+    const sig = cryptoSign.sign(hmacSecret, bodyBytes);
+    res.set('X-Cogos-Signature', sig);
+    res.set('X-Cogos-Signature-Algo', 'hmac-sha256');
+  }
+  res.type('application/json').send(bodyBytes);
+}
 
 const UPSTREAM_PROVIDER = () => (process.env.UPSTREAM_PROVIDER || 'ollama').toLowerCase();
 const UPSTREAM_URL = () =>
@@ -296,7 +311,7 @@ async function handleChatCompletions(req, res) {
     request_id: requestId,
   });
 
-  res.json({
+  sendSignedJson(req, res, {
     id: requestId,
     object: 'chat.completion',
     created: Math.floor(Date.now() / 1000),
@@ -321,11 +336,11 @@ async function handleChatCompletions(req, res) {
   });
 }
 
-async function handleListModels(_req, res) {
+async function handleListModels(req, res) {
   // Customer-facing tier aliases. Honest about what each resolves to.
   const tiers = TIER_TO_MODEL();
   const now = Math.floor(Date.now() / 1000);
-  res.json({
+  sendSignedJson(req, res, {
     object: 'list',
     data: [
       { id: 'cogos-tier-b', object: 'model', created: now, owned_by: 'cogos',

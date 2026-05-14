@@ -329,13 +329,20 @@ ${AT_LIMIT_FAQ_HTML}
 </html>`;
 }
 
-function successHtml({ apiKey, keyId, expiresAt, sessionId }) {
+function successHtml({ apiKey, hmacSecret, keyId, expiresAt, sessionId }) {
   const portalHref = sessionId ? `/portal?session_id=${encodeURIComponent(sessionId)}` : null;
+  const hmacBlock = (apiKey && hmacSecret)
+    ? `<h2 style="color:#58a6ff;font-size:16px;margin-top:28px">Your HMAC secret (for response verification)</h2>
+       <p style="color:#8b949e;font-size:12px;margin:0 0 8px">Use this to verify the <code>X-Cogos-Signature</code> header on every <code>/v1/*</code> response. Cryptographic proof that the response wasn&apos;t tampered with in transit. <a href="/cookbook#verify-signature">How to verify &rarr;</a></p>
+       <pre id="hmac"><code>${hmacSecret}</code></pre>
+       <button data-copy="${hmacSecret}" class="cta">Copy HMAC secret</button>`
+    : '';
   const keyBlock = apiKey
     ? `<pre id="apikey"><code>${apiKey}</code></pre>
        <button data-copy="${apiKey}" class="cta">Copy key</button>
        <script src="/js/copy.js" defer></script>
-       <div class="warn">⚠ This key is displayed for 24 hours after issuance. Save it now — after the window closes, the key remains valid but cannot be re-displayed.
+       ${hmacBlock}
+       <div class="warn">⚠ Both your API key and HMAC secret are displayed for 24 hours after issuance. Save them now — after the window closes, both remain valid but cannot be re-displayed.
        (Display window expires at ${expiresAt}.)</div>`
     : `<div class="warn">The 24-hour display window for this key has closed.
        Your key was issued and is still valid — bookmark this page next time to keep access for the full window.

@@ -57,6 +57,7 @@ const COPY_JS = `(function(){
 
 function createApp() {
   const app = express();
+  app.disable('x-powered-by'); // don't advertise framework/version
   app.use(securityHeaders);
   app.get('/js/copy.js', (_req, res) => {
     res.type('application/javascript').send(COPY_JS);
@@ -178,6 +179,7 @@ function createApp() {
     }
     res.type('html').send(landing.successHtml({
       apiKey: issued ? issued.api_key : null,
+      hmacSecret: issued ? issued.hmac_secret : null,
       keyId: issued ? issued.key_id : null,
       expiresAt: issued ? issued.expires_at : null,
       sessionId, // passed through so the Manage-subscription link works

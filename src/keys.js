@@ -41,6 +41,15 @@ function newKeyPlaintext() {
   return PREFIX + crypto.randomBytes(16).toString('hex');
 }
 
+// HMAC secret for response signing. 32 bytes (256 bits) hex-encoded —
+// same strength as the API key. Customers use it to verify
+// X-Cogos-Signature on every /v1/* response. Stored in the record so the
+// gateway can sign responses; shown to the customer ONCE at issue time
+// alongside the API key (and never re-displayed).
+function newHmacSecret() {
+  return crypto.randomBytes(32).toString('hex');
+}
+
 // Issue a new API key for a tenant. Returns the plaintext (show once).
 // `stripe` is optional metadata: { customer_id, subscription_id, status, email }
 // `package_id` (optional) links the key to a package in packages.json for
@@ -49,10 +58,12 @@ function newKeyPlaintext() {
 function issue({ tenantId, label = '', tier = 'starter', package_id = null, stripe = null } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   const plaintext = newKeyPlaintext();
+  const hmac_secret = newHmacSecret();
   const record = {
     id: crypto.randomUUID(),
     key_hash: hashKey(plaintext),
     key_prefix: plaintext.slice(0, 16), // sk-cogos-XXXXXXXX — display hint, NOT auth
+    hmac_secret, // used to sign /v1/* responses; surfaced to caller below
     tenant_id: tenantId,
     label,
     tier,
@@ -68,7 +79,11 @@ function issue({ tenantId, label = '', tier = 'starter', package_id = null, stri
   const records = readAll();
   records.push(record);
   writeAll(records);
-  return { plaintext, record: { ...record, key_hash: undefined } };
+  return {
+    plaintext,
+    hmac_secret,
+    record: { ...record, key_hash: undefined, hmac_secret: undefined },
+  };
 }
 
 // Find an existing record by Stripe customer ID (used by webhook handlers to
@@ -103,9 +118,14 @@ function verify(plaintext) {
   const hash = hashKey(plaintext);
   const found = records.find((r) => r.key_hash === hash && r.active);
   if (!found) return null;
-  // Best-effort last_used_at touch (non-fatal if it races; usage log is authoritative).
+  // Best-effort last_used_at touch + lazy hmac_secret backfill for keys
+  // issued before HMAC signing was introduced. The customer can never
+  // see the backfilled secret (not on success page anymore), but the
+  // gateway can still sign responses for it. To get a verifiable
+  // signature, the customer rotates to a new key.
   try {
     found.last_used_at = new Date().toISOString();
+    if (!found.hmac_secret) found.hmac_secret = newHmacSecret();
     writeAll(records);
   } catch (_e) { /* no-op */ }
   return { ...found, key_hash: undefined };

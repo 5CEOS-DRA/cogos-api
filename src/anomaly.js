@@ -371,15 +371,31 @@ function observe(req, res, startMs) {
     observeHoneypot(b, now, { ua: ua || null, last_path: lastPath });
   }
 
-  // c) schema_violation per-tenant. Only counts when bearer auth identified
-  // a tenant (req.apiKey set) — pre-auth failures fall to the per-IP
-  // auth_4xx signal instead. Limited to /v1/chat/completions because the
-  // signal name is about schema/upstream failures on the model path.
+  // c) schema_violation per-(tenant, app). Only counts when bearer auth
+  // identified a tenant (req.apiKey set) — pre-auth failures fall to the
+  // per-IP auth_4xx signal instead. Limited to /v1/chat/completions
+  // because the signal name is about schema/upstream failures on the
+  // model path.
+  //
+  // Multi-app round (2026-05-14): the per-tenant bucket is now
+  // partitioned by (tenant_id, app_id) so a misbehaving app inside a
+  // tenant doesn't trip alerts on the tenant's other apps. Pre-multi-app
+  // keys fall under app_id='_default' via the read-time normalization
+  // in src/keys.js (verify/findByEd25519KeyId both backfill). IP-based
+  // counters above intentionally do NOT split by app — an attacker
+  // hitting many apps from one IP still trips one IP bucket.
   if (req.apiKey && req.apiKey.tenant_id
       && lastPath === '/v1/chat/completions'
       && status !== 200) {
-    const b = getOrCreateBucket('tenant', String(req.apiKey.tenant_id), now);
-    observeSchemaViolation(b, now, { ua: ua || null, last_path: lastPath, status });
+    const appId = req.apiKey.app_id || '_default';
+    const subjectValue = `${req.apiKey.tenant_id}:app:${appId}`;
+    const b = getOrCreateBucket('tenant', subjectValue, now);
+    observeSchemaViolation(b, now, {
+      ua: ua || null,
+      last_path: lastPath,
+      status,
+      app_id: appId,
+    });
   }
 
   // e) global p99 latency drift. Track every request.

@@ -118,13 +118,15 @@ describe('anomaly detector — shadow mode', () => {
     expect(readAnomalies().some((e) => e.kind === 'auth_brute_force_suspected')).toBe(true);
   });
 
-  test('per-tenant schema_violation counter increments only when req.apiKey is set', async () => {
+  test('per-(tenant, app) schema_violation counter increments only when req.apiKey is set', async () => {
     const { app, anom } = freshPair();
     anom._test.reset();
-    // Unauthenticated 401 on /v1/chat/completions should NOT increment the
-    // tenant schema_violation counter (no req.apiKey).
+    // Unauthenticated 401 on /v1/chat/completions should NOT increment any
+    // tenant schema_violation counter (no req.apiKey). Multi-app rollout:
+    // bucket key is `${tenant_id}:app:${app_id}` — pre-multi-app keys land
+    // in the `_default` app bucket.
     await request(app).post('/v1/chat/completions').send({});
-    expect(anom._test.getCounter('tenant', 'tenant-x', 'schema_violation')).toBe(0);
+    expect(anom._test.getCounter('tenant', 'tenant-x:app:_default', 'schema_violation')).toBe(0);
 
     // Authenticated tenant call. Without OLLAMA_ENDPOINT configured the
     // upstream is unavailable, so chat-api responds with non-200 — exactly
@@ -136,7 +138,7 @@ describe('anomaly detector — shadow mode', () => {
       .send({ model: 'qwen2.5:3b-instruct', messages: [{ role: 'user', content: 'hi' }] });
     // Tenant counter should have been incremented for this call IF status
     // != 200. Verify whichever way the upstream resolves.
-    const c = anom._test.getCounter('tenant', 'tenant-x', 'schema_violation');
+    const c = anom._test.getCounter('tenant', 'tenant-x:app:_default', 'schema_violation');
     if (res.status === 200) {
       expect(c).toBe(0);
     } else {
@@ -201,6 +203,76 @@ describe('anomaly detector — shadow mode', () => {
     // The previously-aged bucket should have been evicted. The new
     // honeypot hit added one bucket. Counter for the new IP key only.
     expect(anom._test.bucketCount()).toBeLessThanOrEqual(1);
+  });
+
+  test('per-(tenant, app) schema_violation buckets — apps inside one tenant are independent', async () => {
+    // Two keys, same tenant, different apps. A schema_violation hit
+    // against one app must increment its own bucket only; the other
+    // app's bucket stays at 0. (IP-based counters cross apps — that
+    // path stays single-bucket-per-IP and is covered by the auth-4xx
+    // tests above.)
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    const k1 = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-multi', app_id: 'app1' });
+    const k2 = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-multi', app_id: 'app2' });
+    expect(k1.body.app_id).toBe('app1');
+    expect(k2.body.app_id).toBe('app2');
+
+    // Easiest deterministic trigger of the schema_violation observer:
+    // a 400 status from /v1/chat/completions (e.g. missing messages).
+    // The observer fires whenever req.apiKey is set AND status !== 200
+    // AND path is /v1/chat/completions. Going through the auth + bad
+    // body path is much more robust than relying on an upstream call
+    // to fail in a given direction across test environments.
+    const r1 = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${k1.body.api_key}`)
+      .send({}); // missing messages → 400 with req.apiKey populated
+    expect(r1.status).toBe(400);
+
+    // Bucket subject_value shape: `${tenant_id}:app:${app_id}`.
+    const app1Counter = anom._test.getCounter(
+      'tenant', 'tenant-multi:app:app1', 'schema_violation');
+    const app2Counter = anom._test.getCounter(
+      'tenant', 'tenant-multi:app:app2', 'schema_violation');
+    expect(app1Counter).toBe(1);
+    expect(app2Counter).toBe(0);
+  });
+
+  test('per-(tenant, app) buckets: keys with default app land in the _default app bucket', async () => {
+    // Key issued without app_id → app_id='_default'. Its
+    // schema_violation observations land in the `_default` bucket,
+    // NOT a bare-tenant bucket. Pre-multi-app rows + new defaulted
+    // rows therefore share the same bucket, which is exactly what
+    // back-compat needs.
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    const { api_key } = await issueKey(app, 'tenant-default-only');
+    // 400 (missing messages) is the deterministic non-200 trigger. The
+    // observer increments the schema_violation counter whenever
+    // req.apiKey is set, the path is /v1/chat/completions, and status
+    // != 200 — see src/anomaly.js comment block (c).
+    const r = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({});
+    expect(r.status).toBe(400);
+
+    const defaultCounter = anom._test.getCounter(
+      'tenant', 'tenant-default-only:app:_default', 'schema_violation');
+    // Bare-tenant key (legacy shape) is NOT used anymore — confirm it
+    // stayed empty. This guards against a regression where someone
+    // partially threads app_id and bypasses the new bucket key.
+    const bareTenantCounter = anom._test.getCounter(
+      'tenant', 'tenant-default-only', 'schema_violation');
+    expect(defaultCounter).toBe(1);
+    expect(bareTenantCounter).toBe(0);
   });
 
   test('subject_type and subject_value are server-determined enums/values (no client-controlled content)', async () => {

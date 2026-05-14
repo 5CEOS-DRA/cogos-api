@@ -161,3 +161,112 @@ describe('usage hash chain — verifyChain', () => {
     expect(usage.verifyChain(tail, rows[1].row_hash)).toEqual({ ok: true });
   });
 });
+
+// ---------------------------------------------------------------------------
+// Multi-app namespace — per-(tenant, app_id) chain semantics.
+// ---------------------------------------------------------------------------
+describe('usage hash chain — multi-app (tenant, app_id)', () => {
+  test('two apps under one tenant chain independently', () => {
+    const usage = freshUsage();
+    usage.record({ key_id: 'k1', tenant_id: 'A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k1', tenant_id: 'A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'A', app_id: 'app2', model: 'm', status: 'success' });
+
+    const a1 = usage.readSlice({ tenant_id: 'A', app_id: 'app1' });
+    const a2 = usage.readSlice({ tenant_id: 'A', app_id: 'app2' });
+    expect(a1.length).toBe(2);
+    expect(a2.length).toBe(2);
+    // Each app starts at ZERO_HASH — independent genesis.
+    expect(a1[0].prev_hash).toBe('0'.repeat(64));
+    expect(a2[0].prev_hash).toBe('0'.repeat(64));
+    // Within an app the chain links cleanly.
+    expect(a1[1].prev_hash).toBe(a1[0].row_hash);
+    expect(a2[1].prev_hash).toBe(a2[0].row_hash);
+    // Cross-app row_hashes are distinct even though all other content
+    // matches — the app_id is in the canonical payload so identical
+    // tenant + key + ts (impossible in practice; spaced enough here)
+    // would still distinguish.
+    expect(a1[0].row_hash).not.toBe(a2[0].row_hash);
+  });
+
+  test('canonical payload includes app_id — two rows differing only by app_id produce different hashes', () => {
+    const usage = freshUsage();
+    const payload = {
+      ts: '2026-05-14T00:00:00.000Z',
+      tenant_id: 'A',
+      key_id: 'k',
+      route: '/v1/chat/completions',
+      status: 'success',
+      prompt_tokens: 1,
+      completion_tokens: 1,
+      latency_ms: 0,
+      prev_hash: '0'.repeat(64),
+    };
+    const h1 = usage._internal.sha256Hex(
+      usage._internal.canonicalChainPayload({ ...payload, app_id: 'app1' }));
+    const h2 = usage._internal.sha256Hex(
+      usage._internal.canonicalChainPayload({ ...payload, app_id: 'app2' }));
+    expect(h1).not.toBe(h2);
+    // Null/undefined/empty all normalize to '_default' — they MUST hash
+    // identically to the explicit '_default' payload so back-compat rows
+    // chain correctly.
+    const hDefault = usage._internal.sha256Hex(
+      usage._internal.canonicalChainPayload({ ...payload, app_id: '_default' }));
+    const hNull = usage._internal.sha256Hex(
+      usage._internal.canonicalChainPayload({ ...payload, app_id: null }));
+    const hUndef = usage._internal.sha256Hex(
+      usage._internal.canonicalChainPayload({ ...payload }));
+    expect(hDefault).toBe(hNull);
+    expect(hDefault).toBe(hUndef);
+  });
+
+  test('readSlice without app_id returns rows for all apps under the tenant', () => {
+    const usage = freshUsage();
+    usage.record({ key_id: 'k', tenant_id: 'A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k', tenant_id: 'A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k', tenant_id: 'B', app_id: 'app1', model: 'm', status: 'success' });
+    const all = usage.readSlice({ tenant_id: 'A' });
+    expect(all.length).toBe(2);
+    expect(all.every((r) => r.tenant_id === 'A')).toBe(true);
+    // Tenant B is excluded — cross-tenant isolation preserved.
+  });
+
+  test('verifyByApp returns per-app verdict on mixed slice', () => {
+    const usage = freshUsage();
+    usage.record({ key_id: 'k', tenant_id: 'A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k', tenant_id: 'A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k', tenant_id: 'A', app_id: 'app1', model: 'm', status: 'success' });
+    const mixed = usage.readSlice({ tenant_id: 'A' });
+    const result = usage.verifyByApp(mixed);
+    expect(result.app1).toEqual({ ok: true });
+    expect(result.app2).toEqual({ ok: true });
+  });
+
+  test('legacy rows on disk without app_id are surfaced as _default and chain consistently', () => {
+    const usage = freshUsage();
+    // Persist a row that pre-dates the multi-app code AND lacks any
+    // chain fields — exercises both the chain epoch boundary
+    // (row_missing_chain_fields) and the app_id projection. We append
+    // raw JSON, not via record().
+    const pre = {
+      ts: new Date(Date.now() - 1000).toISOString(),
+      key_id: 'old',
+      tenant_id: 'A',
+      model: 'm',
+      status: 'success',
+    };
+    fs.appendFileSync(process.env.USAGE_FILE, JSON.stringify(pre) + '\n');
+    // Now a fresh row via record() — should chain off ZERO_HASH because
+    // findHead(A, _default) finds no row_hash in the pre-row.
+    usage.record({ key_id: 'k1', tenant_id: 'A', model: 'm', status: 'success' });
+
+    // Read default-only — both rows surface under _default.
+    const rows = usage.readSlice({ tenant_id: 'A', app_id: '_default' });
+    expect(rows.length).toBe(2);
+    expect(rows.every((r) => r.app_id === '_default')).toBe(true);
+    // The new row starts at ZERO (the pre-row had no row_hash to chain off).
+    const newRow = rows.find((r) => typeof r.row_hash === 'string');
+    expect(newRow.prev_hash).toBe('0'.repeat(64));
+  });
+});

@@ -302,21 +302,58 @@ function createApp() {
   });
 
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
+  // `scheme` selects the customer-auth substrate:
+  //   - 'bearer' (default): legacy hash-of-plaintext. We store sha256(key),
+  //     customer holds the plaintext (sk-cogos-*). One stealable secret per
+  //     customer at rest on the customer side.
+  //   - 'ed25519':  we generate the keypair, return the private PEM ONCE,
+  //     persist only the public PEM + a stable keyId. No reusable customer
+  //     auth material at rest on our side. Customer signs every request.
   app.post('/admin/keys', adminAuth, (req, res) => {
-    const { tenant_id, label, tier } = req.body || {};
+    const { tenant_id, label, tier, scheme } = req.body || {};
     if (!tenant_id) {
       return res.status(400).json({ error: { message: 'tenant_id required' } });
     }
-    const { plaintext, record } = keys.issue({ tenantId: tenant_id, label, tier });
-    logger.info('key_issued', { id: record.id, tenant_id, tier });
-    res.status(201).json({
-      api_key: plaintext, // shown ONCE; never retrievable again
+    const requestedScheme = scheme || 'bearer';
+    if (requestedScheme !== 'bearer' && requestedScheme !== 'ed25519') {
+      return res.status(400).json({
+        error: { message: `scheme must be 'bearer' or 'ed25519', got '${requestedScheme}'` },
+      });
+    }
+    let issued;
+    try {
+      issued = keys.issue({
+        tenantId: tenant_id,
+        label,
+        tier,
+        scheme: requestedScheme,
+      });
+    } catch (e) {
+      return res.status(400).json({ error: { message: e.message } });
+    }
+    const { plaintext, private_pem, pubkey_pem, ed25519_key_id, record } = issued;
+    logger.info('key_issued', { id: record.id, tenant_id, tier, scheme: requestedScheme });
+
+    // Common response fields; the scheme-specific secrets are added below.
+    const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
       tier: record.tier,
+      scheme: requestedScheme,
       issued_at: record.issued_at,
       warning: 'Save this key now. It will not be shown again.',
-    });
+    };
+    if (requestedScheme === 'bearer') {
+      response.api_key = plaintext; // shown ONCE; never retrievable again
+    } else {
+      // ed25519: private_pem is the customer's auth material, shown ONCE.
+      // pubkey_pem is returned for confirmation; the server retains it.
+      // ed25519_key_id goes in the Authorization header `keyId=` field.
+      response.ed25519_key_id = ed25519_key_id;
+      response.private_pem = private_pem;
+      response.pubkey_pem = pubkey_pem;
+    }
+    res.status(201).json(response);
   });
 
   app.get('/admin/keys', adminAuth, (_req, res) => {

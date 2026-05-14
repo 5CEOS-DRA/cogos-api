@@ -241,6 +241,57 @@ function createApp() {
   app.get('/v1/models', bearerAuth, handleListModels);
   app.post('/v1/chat/completions', bearerAuth, enforcePackage, handleChatCompletions);
 
+  // ---- Customer-facing audit query (Security Hardening Card #3) ----
+  // Returns the requesting tenant's hash-chained usage rows. Strictly
+  // tenant-scoped via req.apiKey.tenant_id — customer A can never see
+  // customer B's rows. `chain_ok` is the server-side verifyChain() result
+  // on the returned slice; customers re-run verification locally for
+  // independent assurance.
+  //
+  // PUBLIC-SCOPING NOTE: this endpoint exposes the per-tenant chain only.
+  // A future card will publish a GLOBAL head-hash (merkle aggregation of
+  // all tenant heads) to a public Azure Blob URL on an hourly cadence,
+  // letting any third party verify the entire log hasn't been rewritten.
+  // The public `/audit/checkpoint/<ts>` endpoint and Azure Blob
+  // integration are intentionally NOT built in this branch — they're
+  // a separate card in SECURITY_HARDENING_PLAN.md.
+  app.get('/v1/audit', bearerAuth, (req, res) => {
+    const sinceMs = Number(req.query.since || 0);
+    const limitRaw = Number(req.query.limit || 100);
+    if (!Number.isFinite(sinceMs) || sinceMs < 0) {
+      return res.status(400).json({
+        error: { message: '`since` must be a non-negative unix-ms integer', type: 'invalid_request_error' },
+      });
+    }
+    if (!Number.isFinite(limitRaw) || limitRaw < 0) {
+      return res.status(400).json({
+        error: { message: '`limit` must be a non-negative integer', type: 'invalid_request_error' },
+      });
+    }
+    const limit = Math.min(1000, Math.max(0, Math.floor(limitRaw)));
+    const tenantId = req.apiKey && req.apiKey.tenant_id;
+    const rows = usage.readByTenant(tenantId, sinceMs, limit);
+    const chain = usage.verifyChain(rows);
+    // next_cursor = ts (ms) of the last returned row, so the caller can
+    // page forward by passing it back as `since`. Null when no rows
+    // returned OR the slice didn't fill `limit` (no more rows to fetch).
+    let nextCursor = null;
+    if (rows.length === limit && rows.length > 0) {
+      const lastTs = Date.parse(rows[rows.length - 1].ts);
+      if (Number.isFinite(lastTs)) nextCursor = lastTs;
+    }
+    res.json({
+      rows,
+      next_cursor: nextCursor,
+      chain_ok: chain.ok,
+      chain_break: chain.ok ? null : {
+        broke_at_index: chain.broke_at_index,
+        reason: chain.reason,
+      },
+      server_time_ms: Date.now(),
+    });
+  });
+
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
   app.post('/admin/keys', adminAuth, (req, res) => {
     const { tenant_id, label, tier } = req.body || {};

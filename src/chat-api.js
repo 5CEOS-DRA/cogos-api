@@ -24,10 +24,41 @@ const logger = require('./logger');
 const usage = require('./usage');
 const packages = require('./packages');
 const cryptoSign = require('./crypto-sign');
+const attestation = require('./attestation');
 
-// Send a JSON response with X-Cogos-Signature when an HMAC secret is
-// available on the bound API key. Customer can verify by recomputing
-// HMAC-SHA256(hmac_secret, raw_response_body) on their side.
+// Resolve the chain head AFTER a usage row was just appended for this
+// (tenant_id, app_id). usage.record() doesn't return the row_hash (the
+// sealed-audit owner of src/usage.js controls that surface), so we call
+// usage._internal.findHead() — which scans backwards for the most recent
+// row matching the pair and returns its row_hash. This is by-construction
+// the row we just wrote, because usage.record() did the same lookup,
+// computed the new row_hash, and appended it.
+//
+// Returns the 64-zero ZERO_HASH if no row exists yet for the pair (e.g.
+// pre-record failure paths where attestation still emits a token that
+// records "this response did NOT enter the chain"). Customers can detect
+// that case from chain_head not advancing across consecutive receipts.
+function chainHeadAfter(tenantId, appId) {
+  try {
+    if (!tenantId) return usage.ZERO_HASH;
+    return usage._internal.findHead(tenantId, appId);
+  } catch (_e) {
+    return usage.ZERO_HASH;
+  }
+}
+
+// Send a JSON response with two signatures:
+//   - X-Cogos-Signature: HMAC-SHA256(hmac_secret, raw_response_body)
+//     Belt-and-suspenders transit integrity for customers holding an HMAC
+//     secret (issued alongside the API key).
+//   - X-Cogos-Attestation: ed25519-signed token that cryptographically
+//     binds (req_hash, resp_hash, source_rev, chain_head_after, ts) under
+//     the per-process attestation key. Verifiable via /attestation.pub.
+//     See src/attestation.js for the threat model and key strategy.
+//
+// Both headers are emitted on every /v1/* response — attestation does not
+// require the customer to hold any secret to verify; it's a public-key
+// receipt.
 function sendSignedJson(req, res, body) {
   const hmacSecret = req.apiKey && req.apiKey.hmac_secret;
   const bodyBytes = JSON.stringify(body);
@@ -35,6 +66,28 @@ function sendSignedJson(req, res, body) {
     const sig = cryptoSign.sign(hmacSecret, bodyBytes);
     res.set('X-Cogos-Signature', sig);
     res.set('X-Cogos-Signature-Algo', 'hmac-sha256');
+  }
+  // Attestation token. The chain head is read AFTER the response body is
+  // serialized — that's also AFTER usage.record() ran for this request
+  // (the chat-completions handler does that before calling us), so the
+  // chain head reflects the row we just appended. For /v1/models (which
+  // doesn't append a usage row) the chain head is the prior tenant head;
+  // that's still a meaningful bind (the customer's receipt anchors to
+  // their last successful chain row).
+  const tenantId = req.apiKey && req.apiKey.tenant_id;
+  const appId = req.apiKey && req.apiKey.app_id;
+  const chainHead = chainHeadAfter(tenantId, appId);
+  const token = attestation.sign({
+    method: req.method,
+    path: req.originalUrl || req.url,
+    ts: Date.now(),
+    reqBody: req.rawBody, // express.json verify hook stashes the raw bytes
+    respBody: bodyBytes,
+    chainHead,
+  });
+  if (token) {
+    res.set('X-Cogos-Attestation', token);
+    res.set('X-Cogos-Attestation-Algo', 'ed25519');
   }
   res.type('application/json').send(bodyBytes);
 }

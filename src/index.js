@@ -15,6 +15,7 @@ const legal = require('./legal');
 const whitepaper = require('./whitepaper');
 const demo = require('./demo');
 const cookbook = require('./cookbook');
+const attestation = require('./attestation');
 const trust = require('./trust');
 const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
@@ -194,6 +195,23 @@ function createApp() {
       );
     }
     res.type('text/plain').send(pem);
+  });
+
+  // ---- Public: per-response attestation pubkey (no auth) ----
+  // Companion to /cosign.pub for the new attestation-token primitive.
+  // Customers fetch this PEM to verify the X-Cogos-Attestation header on
+  // any /v1/* response. The keypair is ephemeral per process — a container
+  // restart rotates it. Customers re-fetch on each verification cycle the
+  // same way they trust TLS cert rotation. The X-Cogos-Attestation-Kid
+  // header echoes the first 16 hex of sha256(pem) so a customer with
+  // multiple stale receipts can match each one to its issuing key.
+  //
+  // Source: in-process Ed25519 keypair generated at first signing call.
+  // See src/attestation.js for why we deliberately do NOT load a
+  // long-lived signing key here.
+  app.get('/attestation.pub', (_req, res) => {
+    res.set('X-Cogos-Attestation-Kid', attestation.getAttestationKid());
+    res.type('text/plain').send(attestation.getAttestationPubkey());
   });
 
   // ---- Legal pages (required for Stripe activation, public, no auth) ----

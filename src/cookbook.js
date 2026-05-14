@@ -358,6 +358,131 @@ const data = JSON.parse(raw.toString("utf8"));</code></pre>
 
 <hr>
 
+<h2 id="verify-attestation">Verify a per-response attestation token</h2>
+
+<div class="recipe">
+<p>Every <code>/v1/*</code> response also carries an <code>X-Cogos-Attestation</code> header containing a small Ed25519-signed token. Where <code>X-Cogos-Signature</code> proves "this body wasn&apos;t tampered with in transit," the attestation token proves something much stronger: <strong>this exact response was emitted by a specific build of CogOS, against a specific request, at a specific position in the audit chain.</strong></p>
+
+<p>The token binds five things cryptographically:</p>
+<ul>
+  <li><code>req_hash</code> &mdash; <code>sha256(METHOD || "\n" || path || "\n" || ts || "\n" || sha256(body))</code> of your request</li>
+  <li><code>resp_hash</code> &mdash; <code>sha256</code> of the raw response body bytes you received</li>
+  <li><code>rev</code> &mdash; the cogos-api source revision SHA the response came from</li>
+  <li><code>chain_head</code> &mdash; the <code>row_hash</code> of the audit row appended for this request</li>
+  <li><code>ts</code> &mdash; server-side issuance timestamp</li>
+</ul>
+
+<p>Signed with an Ed25519 key bound to the running process. Fetch the public PEM from <code>/attestation.pub</code> to verify. The wire format is <code>&lt;payload_b64url&gt;.&lt;signature_b64url&gt;</code> &mdash; JWT-style separator, no JWT header (algorithm is pinned to Ed25519 by spec, no negotiation = no alg-confusion attack surface).</p>
+
+<div class="callout">
+This is what no other AI vendor emits. Frontier APIs sign only at the TLS layer &mdash; you can&apos;t prove later, to a regulator, that a specific response actually came from a specific build of their substrate, at a specific position in their audit chain. With CogOS attestation, you keep the token alongside the response and you hold the receipt forever. If we ever rewrote our audit log after the fact, no path through the rewritten log would reproduce a <code>chain_head</code> you already wrote down.
+</div>
+
+<pre><span class="code-label">python</span><code>import base64, hashlib, json, os
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
+from cryptography.exceptions import InvalidSignature
+import requests
+
+API_KEY = os.environ["COGOS_API_KEY"]
+BASE = "https://cogos.5ceos.com"
+
+# 1. Make a request — capture body bytes, headers, token.
+body = json.dumps({
+  "model": "cogos-tier-b",
+  "messages": [{"role":"user","content":"hi"}],
+})
+r = requests.post(
+  f"{BASE}/v1/chat/completions",
+  headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
+  data=body,
+)
+raw_resp = r.content                                   # exact bytes the server signed
+token = r.headers["X-Cogos-Attestation"]
+
+# 2. Decode payload + signature.
+def b64url_decode(s: str) -> bytes:
+  return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
+
+payload_b64, sig_b64 = token.split(".")
+payload_json = b64url_decode(payload_b64)
+sig = b64url_decode(sig_b64)
+payload = json.loads(payload_json)
+
+# 3. Verify the signature against the live pubkey.
+pub_pem = requests.get(f"{BASE}/attestation.pub").content
+pub_key = load_pem_public_key(pub_pem)
+try:
+  pub_key.verify(sig, payload_json)                    # raises on bad signature
+except InvalidSignature:
+  raise RuntimeError("attestation signature invalid — reject")
+
+# 4. Verify the bindings.
+body_hash = hashlib.sha256(body.encode()).hexdigest()
+canonical = f"POST\\n/v1/chat/completions\\n{payload['ts']}\\n{body_hash}"
+expected_req_hash = hashlib.sha256(canonical.encode()).hexdigest()
+assert payload["req_hash"] == expected_req_hash, "request bind broken"
+
+expected_resp_hash = hashlib.sha256(raw_resp).hexdigest()
+assert payload["resp_hash"] == expected_resp_hash, "response bind broken — body tampered"
+
+# 5. (Optional) record payload['chain_head'] + payload['rev'] alongside
+# the response. Later you can cross-check chain_head against your own
+# /v1/audit history; the rev field tells you exactly which CogOS build
+# emitted this response.
+print(f"verified: rev={payload['rev']} chain_head={payload['chain_head'][:16]}...")</code></pre>
+
+<pre><span class="code-label">node</span><code>import crypto from "node:crypto";
+
+const BASE = "https://cogos.5ceos.com";
+const API_KEY = process.env.COGOS_API_KEY;
+
+// 1. Make a request — capture exact bytes, headers, token.
+const body = JSON.stringify({
+  model: "cogos-tier-b",
+  messages: [{ role: "user", content: "hi" }],
+});
+const r = await fetch(\`\${BASE}/v1/chat/completions\`, {
+  method: "POST",
+  headers: { "Authorization": \`Bearer \${API_KEY}\`, "Content-Type": "application/json" },
+  body,
+});
+const rawResp = Buffer.from(await r.arrayBuffer());
+const token = r.headers.get("x-cogos-attestation");
+
+// 2. Decode payload + signature (base64url, no padding).
+const b64urlDecode = (s) => {
+  const pad = s.length % 4 === 0 ? 0 : 4 - (s.length % 4);
+  return Buffer.from(s.replace(/-/g, "+").replace(/_/g, "/") + "=".repeat(pad), "base64");
+};
+const [payloadB64, sigB64] = token.split(".");
+const payloadJson = b64urlDecode(payloadB64);
+const sig = b64urlDecode(sigB64);
+const payload = JSON.parse(payloadJson.toString("utf8"));
+
+// 3. Verify the signature against the live pubkey.
+const pubPem = await (await fetch(\`\${BASE}/attestation.pub\`)).text();
+const pubKey = crypto.createPublicKey(pubPem);
+const ok = crypto.verify(null, payloadJson, pubKey, sig);
+if (!ok) throw new Error("attestation signature invalid — reject");
+
+// 4. Verify the bindings.
+const bodyHash = crypto.createHash("sha256").update(body).digest("hex");
+const canonical = \`POST\\n/v1/chat/completions\\n\${payload.ts}\\n\${bodyHash}\`;
+const expectedReqHash = crypto.createHash("sha256").update(canonical).digest("hex");
+if (payload.req_hash !== expectedReqHash) throw new Error("request bind broken");
+
+const expectedRespHash = crypto.createHash("sha256").update(rawResp).digest("hex");
+if (payload.resp_hash !== expectedRespHash) throw new Error("response bind broken — body tampered");
+
+console.log(\`verified: rev=\${payload.rev} chain_head=\${payload.chain_head.slice(0, 16)}...\`);</code></pre>
+
+<div class="lesson">Lesson: the signature is over the <em>token payload</em>, not over the response body. A MITM that rewrites the body but keeps the original token will leave the token signature-valid &mdash; but <code>resp_hash</code> inside the token will no longer match <code>sha256(body)</code> you received. That hash mismatch is the detection mechanism. Always verify BOTH the Ed25519 signature AND the resp_hash bind.</div>
+
+<div class="lesson">Operational note: each container restart rotates the keypair. The fetch of <code>/attestation.pub</code> is therefore live, not cached &mdash; same operational shape as TLS cert rotation. Tokens you stored from a previous deploy can no longer be verified against the current pubkey; for long-lived court-defensible receipts, capture the pubkey alongside the token at issuance time.</div>
+</div>
+
+<hr>
+
 <h2>Patterns we deliberately don&apos;t show</h2>
 
 <p>

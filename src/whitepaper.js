@@ -45,6 +45,7 @@ nav a{margin-right:14px}
 const NAV = `<nav style="margin-bottom:18px;font-size:11px">
   <a href="/">Home</a>
   <a href="/whitepaper" style="color:#79c0ff">Whitepaper</a>
+  <a href="/trust">Trust</a>
   <a href="/#pricing">Pricing</a>
   <a href="${BENCH_URL}">Bench</a>
   <a href="/terms">Terms</a>

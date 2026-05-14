@@ -1,7 +1,10 @@
 node_modules/
 .env
 .env.local
-data/
+data/*
+# Allow the example pentest-history schema reference — it documents the
+# /trust dashboard's input shape without containing any real engagement data.
+!data/pentest-history.example.json
 *.log
 coverage/
 .DS_Store

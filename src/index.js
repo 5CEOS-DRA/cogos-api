@@ -15,6 +15,7 @@ const legal = require('./legal');
 const whitepaper = require('./whitepaper');
 const demo = require('./demo');
 const cookbook = require('./cookbook');
+const trust = require('./trust');
 const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
 
@@ -184,6 +185,19 @@ function createApp() {
   app.get('/whitepaper', (_req, res) => res.type('html').send(whitepaper.whitepaperHtml()));
   app.get('/demo', (_req, res) => res.type('html').send(demo.demoHtml()));
   app.get('/cookbook', (_req, res) => res.type('html').send(cookbook.cookbookHtml()));
+
+  // ---- Trust / transparency dashboard (public, no auth) ----
+  // Modeled on trust.salesforce.com. Every claim on the page is backed by
+  // data this process can prove from env + process state, or mirrored from
+  // SECURITY.md §3. We never fabricate uptime, advisories, or pentest data:
+  // if the source data isn't present, the page renders an honest placeholder.
+  app.get('/trust', (_req, res) => {
+    // healthOk reflects whether *this* process can serve traffic — it's true
+    // here by definition (we're servicing the request). A future health-aware
+    // probe could flip this to 'degraded' on partial-failure signals.
+    const state = trust.buildTrustState({ healthOk: true });
+    res.type('html').send(trust.trustHtml(state));
+  });
 
   app.post('/signup', async (req, res) => {
     try {

@@ -166,6 +166,12 @@ function renderLandingHtml(packages = []) {
     open-source, MIT, run it yourself with any provider's credentials.
   </div>
 
+  <div style="background:#1a1633;border:1px solid #9d76ff;border-left:3px solid #9d76ff;color:#d3c4ff;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px;line-height:1.6">
+    <strong style="color:#c8b3ff">🔒 Verifiable security, not vendor-attested.</strong>
+    Every <code style="background:#0a0e14;color:#c8b3ff;padding:1px 5px;border-radius:3px">/v1</code> response carries an HMAC tamper signature <em>and</em> an Ed25519 attestation receipt binding the request, the response, the running build, and our audit chain head. Customer authentication can be Ed25519 keypair-based — you hold the private key, we hold only the public. Each customer&apos;s audit log is hash-chained per-(tenant, app), and the content of every row is encrypted to your X25519 public key at write time — <strong style="color:#e6edf3">we can&apos;t decrypt the rows we just wrote</strong>. Container images are cosign-signed, the runtime is distroless with no shell and no admin endpoint on the internet, and a Container App Job runs continuous probes against this domain daily.
+    <a href="/trust" style="color:#79c0ff;font-weight:600">See /trust &rarr;</a> &middot; <a href="/cookbook#verify-signature" style="color:#79c0ff">verify a signature &rarr;</a>
+  </div>
+
   <div style="background:#0d1f33;border:1px solid #58a6ff;border-left:3px solid #58a6ff;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
     <strong style="color:#79c0ff">&rarr; Run the 90-second proof.</strong>
     Copy-paste code that proves determinism, schema-locking, and cost on your own machine.

@@ -1,20 +1,34 @@
+# syntax=docker/dockerfile:1
+#
+# cogos-api runtime image — security posture
+# ------------------------------------------
+# Runtime stage uses Google's distroless nodejs20 image:
+#   - No shell (no /bin/sh, /bin/bash) — eliminates a whole class of
+#     post-exploitation tradecraft (no `sh -c`, no curl pipe-to-shell).
+#   - No package manager (no apk/apt) — attacker cannot install tools
+#     in a compromised container.
+#   - Runs as the built-in `nonroot` user (uid 65532), never root.
+#   - Read-only-root-filesystem ready: only /app/data needs to be
+#     writable, and it is intended to be a mounted volume in prod
+#     (run with `--read-only --tmpfs /tmp -v cogos-data:/app/data`).
+# The builder stage is still node:20-alpine because `npm ci` needs
+# npm and a shell; that stage is discarded and never reaches prod.
+
 FROM node:20-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev
+RUN npm ci --omit=dev \
+ && mkdir -p /app/data
 
-FROM node:20-alpine
+FROM gcr.io/distroless/nodejs20-debian12:nonroot
 WORKDIR /app
-RUN apk add --no-cache wget && \
-    addgroup -S app && adduser -S app -G app
-COPY --from=deps /app/node_modules ./node_modules
-COPY --chown=app:app src ./src
-COPY --chown=app:app package.json ./
-RUN mkdir -p /app/data && chown -R app:app /app/data
+COPY --from=deps --chown=nonroot:nonroot /app/node_modules ./node_modules
+COPY --from=deps --chown=nonroot:nonroot /app/data ./data
+COPY --chown=nonroot:nonroot src ./src
+COPY --chown=nonroot:nonroot package.json ./
 ENV NODE_ENV=production \
     PORT=4444
-USER app
 EXPOSE 4444
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD wget -qO- http://127.0.0.1:4444/health || exit 1
-CMD ["node", "src/index.js"]
+  CMD ["/nodejs/bin/node","-e","require('http').get('http://127.0.0.1:4444/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))"]
+CMD ["src/index.js"]

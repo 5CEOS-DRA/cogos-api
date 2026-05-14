@@ -15,6 +15,7 @@ const legal = require('./legal');
 const whitepaper = require('./whitepaper');
 const demo = require('./demo');
 const cookbook = require('./cookbook');
+const honeypot = require('./honeypot');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -59,6 +60,15 @@ function createApp() {
   const app = express();
   app.disable('x-powered-by'); // don't advertise framework/version
   app.use(securityHeaders);
+
+  // Honeypot middleware. Mounted EARLY — after securityHeaders so the
+  // CSP/HSTS still apply to fake responses, but before the JSON body
+  // parser and before every real route. Intercepts scanner-target
+  // paths (/.env, /.git/*, /wp-admin, /api/v0/*, etc) and returns
+  // plausible-looking-but-obviously-canary responses. Every hit is
+  // logged at WARN level. See src/honeypot.js for the path table.
+  app.use(honeypot);
+
   app.get('/js/copy.js', (_req, res) => {
     res.type('application/javascript').send(COPY_JS);
   });

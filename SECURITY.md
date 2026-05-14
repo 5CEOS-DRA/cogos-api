@@ -18,15 +18,13 @@ If you came here to file a vulnerability, jump to [§1 Reporting a vulnerability
 
 ### Primary channel
 
-**Email: `security@5ceos.com`**
+**Email: `support@5ceos.com` — subject prefix: `[SECURITY]`**
 
-This alias is reserved exclusively for security disclosures. Do **not** use `support@5ceos.com`, GitHub issues, social channels, or any other path — it slows triage and risks public exposure of an unpatched issue.
+Use the `[SECURITY]` subject prefix to route triage out of the normal support queue. Do **not** use GitHub issues, social channels, or any other public path — those slow triage and risk public exposure of an unpatched issue. A dedicated `security@5ceos.com` alias may be provisioned once disclosure volume warrants it; until then the `[SECURITY]` prefix is the trigger.
 
-> **Note for early reporters (pre-launch window):** the `security@5ceos.com` alias may not yet be fully provisioned on our mail substrate. If your message bounces, retry once after 24h; if it still bounces, flag the situation in a GitHub Discussion (do **not** post the vulnerability details — just say "I have a security report and the mailbox is bouncing"). We will reach out privately within one business day. We apologize for any friction during the initial OSS window.
+### Encrypted disclosure
 
-### PGP
-
-A PGP key for `security@5ceos.com` will be published at `https://cogos.5ceos.com/.well-known/security-pgp.asc` and fingerprinted in this section once published. **PGP key publishing: TBD.** Until then, send disclosures in plaintext to the alias above; we will respond from a verifiable address and you can encrypt subsequent rounds against a fingerprint we hand back.
+Send disclosures in plaintext to the address above; we will respond from a verifiable signed address and you can encrypt subsequent rounds against a fingerprint we hand back. We deliberately do not publish a long-lived PGP key — disclosure handlers rotate, and a stale published key is a worse trust signal than an ephemeral signed reply.
 
 ### What to include
 
@@ -93,7 +91,7 @@ Good-faith research that:
 |---|---|
 | Third-party model weights (Qwen 2.5, any future open-weight model we serve) | Upstream of us. Report at the model author's tracker. |
 | Customer-side key compromise (their laptop, their CI, their secret manager) | We can't help if their key is leaked. We **can** revoke a key on request — see `/admin/keys/:id/revoke`. |
-| Social engineering of 5CEOS staff or customers | Out-of-band; report directly to `security@5ceos.com` as standard abuse if you observe it, but it's not a code-defect bounty target. |
+| Social engineering of 5CEOS staff or customers | Out-of-band; report to `support@5ceos.com` with `[SECURITY]` subject prefix as standard abuse if you observe it, but it's not a code-defect bounty target. |
 | Physical access to 5CEOS infrastructure | Not in the threat model of an OSS gateway. |
 | Volumetric denial of service (L3/L4 floods, hash collision floods, etc.) | Handled at the Cloudflare edge; report via [Cloudflare's abuse flow](https://www.cloudflare.com/abuse/) so the trace data lands in the right place. |
 | Issues in third-party OSS dependencies (Express, Stripe SDK, etc.) | Report **upstream first**, then ping us so we can pull the patched version once published. |

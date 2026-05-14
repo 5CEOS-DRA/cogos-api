@@ -157,6 +157,26 @@ function createApp() {
   });
   app.get('/cancel', (_req, res) => res.type('html').send(landing.CANCEL_HTML));
 
+  // ---- Public: cosign verification pubkey (no auth) ----
+  // Customers + auditors fetch this to verify cosigned container images:
+  //   cosign verify --key https://cogos.5ceos.com/cosign.pub <image>
+  // Source: COSIGN_PUBKEY_PEM env (full PEM string) or COSIGN_PUBKEY_FILE
+  // (path to a PEM file readable by the container). Both unset → 404 with
+  // a hint so the URL doesn't 500.
+  app.get('/cosign.pub', (_req, res) => {
+    const pem = process.env.COSIGN_PUBKEY_PEM
+      || (process.env.COSIGN_PUBKEY_FILE
+          ? (() => { try { return require('node:fs').readFileSync(process.env.COSIGN_PUBKEY_FILE, 'utf8'); } catch { return null; } })()
+          : null);
+    if (!pem) {
+      return res.status(404).type('text/plain').send(
+        '# cosign pubkey not yet published\n'
+        + '# Set COSIGN_PUBKEY_PEM or COSIGN_PUBKEY_FILE on the deployed container.\n'
+      );
+    }
+    res.type('text/plain').send(pem);
+  });
+
   // ---- Legal pages (required for Stripe activation, public, no auth) ----
   app.get('/terms', (_req, res) => res.type('html').send(legal.termsHtml()));
   app.get('/privacy', (_req, res) => res.type('html').send(legal.privacyHtml()));

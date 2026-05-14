@@ -100,23 +100,65 @@
 //     so the customer doesn't have to compare receipts to spot it.
 
 const crypto = require('crypto');
+const fs = require('node:fs');
+const path = require('node:path');
 
-// -- ephemeral keypair, generated on first import -----------------------------
+// -- attestation keypair --------------------------------------------------------
+// Persist the keypair across container restarts so previously-issued receipts
+// stay verifiable. Without persistence, every revision rollover invalidates
+// every receipt customers captured before it — a real operational hole.
+//
+// Storage: ATTESTATION_KEY_FILE env (full PEM path) or default
+// data/attestation-key.pem on the writable volume. File mode 0600. Threat
+// model: a disk-level compromise leaks the attestation signing key (attacker
+// can forge receipts going forward). It does NOT leak the audit cipher (those
+// are separate per-customer keys we cannot decrypt). Pragmatic middle vs.
+// either ephemeral (breaks old receipts) or long-term-shared-secret-in-KV.
+//
 // Generated lazily so test code that wants to pin a keypair via
 // setKeyPairForTest() can do so before the first sign() call.
 
-let _priv = null; // node:crypto KeyObject (private)
-let _pub = null;  // node:crypto KeyObject (public)
+let _priv = null;
+let _pub = null;
 let _pubPem = null;
 let _kid = null;
 
+function _keyFilePath() {
+  return process.env.ATTESTATION_KEY_FILE
+    || path.join(process.cwd(), 'data', 'attestation-key.pem');
+}
+
 function _ensureKeyPair() {
   if (_priv && _pub) return;
+  const filePath = _keyFilePath();
+  // 1) Try to load an existing persisted key.
+  try {
+    const pem = fs.readFileSync(filePath, 'utf8');
+    const priv = crypto.createPrivateKey(pem);
+    const pub = crypto.createPublicKey(priv);
+    _priv = priv;
+    _pub = pub;
+    _pubPem = pub.export({ type: 'spki', format: 'pem' });
+    _kid = _computeKid(_pubPem);
+    return;
+  } catch (_e) { /* fall through to generate */ }
+  // 2) Generate fresh + persist (best-effort; if the dir isn't writable we
+  //    fall back to ephemeral and log once — receipts still work for this
+  //    process lifetime).
   const { privateKey, publicKey } = crypto.generateKeyPairSync('ed25519');
   _priv = privateKey;
   _pub = publicKey;
   _pubPem = publicKey.export({ type: 'spki', format: 'pem' });
   _kid = _computeKid(_pubPem);
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+    const privPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
+    fs.writeFileSync(filePath, privPem, { mode: 0o600 });
+  } catch (e) {
+    if (!process.env.ATTESTATION_QUIET) {
+      console.warn(`[attestation] could not persist key at ${filePath}: ${e.message} — receipts will not survive restart`);
+    }
+  }
 }
 
 function _computeKid(pubPem) {

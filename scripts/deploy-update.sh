@@ -38,6 +38,12 @@ az acr build \
 
 echo ""
 echo "[deploy] [1.5/3] cosign sign ${NEW_IMAGE}..."
+# Auto-detect cosign.key in $PWD if COSIGN_KEY_FILE is unset — common
+# case after running scripts/cosign-setup.sh in the same directory.
+if [ -z "${COSIGN_KEY_FILE:-}" ] && [ -f "$PWD/cosign.key" ]; then
+  COSIGN_KEY_FILE="$PWD/cosign.key"
+  echo "[deploy] auto-detected COSIGN_KEY_FILE=$COSIGN_KEY_FILE"
+fi
 if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ]; then
   if command -v cosign &>/dev/null; then
     COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" || echo "[deploy] WARN: cosign sign exited non-zero — proceeding without enforcement (week-0 additive)"

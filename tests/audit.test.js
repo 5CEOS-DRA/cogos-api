@@ -213,3 +213,196 @@ describe('GET /v1/audit — chain returned', () => {
     expect(res.body.next_cursor).toBeNull();
   });
 });
+
+// ===========================================================================
+// Multi-app namespace — per-(tenant, app_id) chain semantics.
+// ===========================================================================
+//
+// Each app within a tenant runs an INDEPENDENT chain. The cross-app /v1/audit
+// read returns rows interleaved by ts, but chain_ok_by_app reports per-app
+// integrity. Scoped reads (?app_id=...) return one app's slice and a single
+// chain verdict.
+//
+// Backward compat: a key issued WITHOUT app_id lands in app_id='_default',
+// and rows persisted before the multi-app rollout (no app_id on disk) are
+// surfaced under '_default' at read time so existing customers see no
+// regression. The chain epoch boundary is documented in src/usage.js.
+describe('GET /v1/audit — multi-app namespace', () => {
+  test('per-(tenant, app) chains: two apps in tenant A each start at ZERO_HASH', async () => {
+    const app = freshApp();
+    // Issue one key per app — the gateway uses req.apiKey.app_id at
+    // append time, but readSlice() filters by (tenant_id, app_id) so
+    // the slice for app1 must be independent of app2 even though both
+    // belong to the same tenant.
+    const app1Key = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A', app_id: 'app1' });
+    const app2Key = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A', app_id: 'app2' });
+    expect(app1Key.body.app_id).toBe('app1');
+    expect(app2Key.body.app_id).toBe('app2');
+
+    const usage = freshUsage();
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+
+    // Scoped read on app1 — only app1 rows, chain starts at ZERO.
+    const r1 = await request(app)
+      .get('/v1/audit?app_id=app1')
+      .set('Authorization', `Bearer ${app1Key.body.api_key}`);
+    expect(r1.status).toBe(200);
+    expect(r1.body.rows.length).toBe(2);
+    r1.body.rows.forEach((r) => expect(r.app_id).toBe('app1'));
+    expect(r1.body.rows[0].prev_hash).toBe('0'.repeat(64));
+    expect(r1.body.rows[1].prev_hash).toBe(r1.body.rows[0].row_hash);
+    expect(r1.body.chain_ok).toBe(true);
+    expect(r1.body.chain_ok_by_app).toEqual({ app1: true });
+    expect(r1.body.app_id).toBe('app1');
+
+    // Scoped read on app2 — independent chain, also starts at ZERO.
+    const r2 = await request(app)
+      .get('/v1/audit?app_id=app2')
+      .set('Authorization', `Bearer ${app2Key.body.api_key}`);
+    expect(r2.status).toBe(200);
+    expect(r2.body.rows.length).toBe(2);
+    r2.body.rows.forEach((r) => expect(r.app_id).toBe('app2'));
+    expect(r2.body.rows[0].prev_hash).toBe('0'.repeat(64));
+    expect(r2.body.chain_ok).toBe(true);
+    expect(r2.body.chain_ok_by_app).toEqual({ app2: true });
+  });
+
+  test('cross-app read interleaves rows but reports chain_ok_by_app per app', async () => {
+    const app = freshApp();
+    const k = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A', app_id: 'app1' });
+    const usage = freshUsage();
+    // Interleave appends from two apps under the same tenant.
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+
+    // No app_id query — cross-app response.
+    const res = await request(app)
+      .get('/v1/audit')
+      .set('Authorization', `Bearer ${k.body.api_key}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows.length).toBe(4);
+    // app_id field on the response is null in cross-app mode.
+    expect(res.body.app_id).toBeNull();
+    // chain_ok_by_app has one entry per app present in the slice.
+    expect(res.body.chain_ok_by_app).toEqual({ app1: true, app2: true });
+    expect(res.body.chain_ok).toBe(true);
+    // Rows still appear in ts order (the interleaved view the customer
+    // asked for) — not grouped by app.
+    const apps = res.body.rows.map((r) => r.app_id);
+    expect(apps).toContain('app1');
+    expect(apps).toContain('app2');
+  });
+
+  test('cross-tenant isolation preserved with multi-app: B cannot see A even with matching app_id', async () => {
+    const app = freshApp();
+    const aKey = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A', app_id: 'shared' });
+    const bKey = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-B', app_id: 'shared' });
+    const usage = freshUsage();
+    usage.record({ key_id: 'ka', tenant_id: 'tenant-A', app_id: 'shared', model: 'm', status: 'success' });
+    usage.record({ key_id: 'kb', tenant_id: 'tenant-B', app_id: 'shared', model: 'm', status: 'success' });
+
+    // B asks for app_id=shared. Must return ONLY tenant-B rows — the
+    // app_id query param does NOT widen the tenant scope.
+    const res = await request(app)
+      .get('/v1/audit?app_id=shared')
+      .set('Authorization', `Bearer ${bKey.body.api_key}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows.length).toBe(1);
+    expect(res.body.rows[0].tenant_id).toBe('tenant-B');
+  });
+
+  test('keys with NO app_id default to "_default" and chain there', async () => {
+    const app = freshApp();
+    // Note: no app_id in the issue body — must default to _default.
+    const k = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A' });
+    expect(k.body.app_id).toBe('_default');
+
+    const usage = freshUsage();
+    // Two rows persisted with no app_id (mimics the pre-multi-app
+    // call sites). Reader projects them under _default.
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', model: 'm', status: 'success' });
+
+    const res = await request(app)
+      .get('/v1/audit')
+      .set('Authorization', `Bearer ${k.body.api_key}`);
+    expect(res.status).toBe(200);
+    expect(res.body.rows.length).toBe(2);
+    expect(res.body.chain_ok).toBe(true);
+    expect(res.body.chain_ok_by_app).toEqual({ _default: true });
+    res.body.rows.forEach((r) => expect(r.app_id).toBe('_default'));
+  });
+
+  test('app_id with invalid shape → 400 (slug-only, max 64 chars)', async () => {
+    const app = freshApp();
+    const { api_key } = await issueKey(app, 'tenant-A');
+    const bad = await request(app)
+      .get('/v1/audit?app_id=' + encodeURIComponent('NOT VALID'))
+      .set('Authorization', `Bearer ${api_key}`);
+    expect(bad.status).toBe(400);
+    // Capital-letter rejection comes via the same normalizer.
+    const bad2 = await request(app)
+      .get('/v1/audit?app_id=Apps')
+      .set('Authorization', `Bearer ${api_key}`);
+    expect(bad2.status).toBe(400);
+  });
+
+  test('tampered row in one app does not falsely flag the other', async () => {
+    const app = freshApp();
+    const k = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-A', app_id: 'app1' });
+    const usage = freshUsage();
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k1', tenant_id: 'tenant-A', app_id: 'app1', model: 'm', status: 'success' });
+    usage.record({ key_id: 'k2', tenant_id: 'tenant-A', app_id: 'app2', model: 'm', status: 'success' });
+
+    // Corrupt the app2 row by flipping status — leaves the row_hash
+    // intact, so verifyChain catches the content mismatch.
+    const raw = fs.readFileSync(process.env.USAGE_FILE, 'utf8');
+    const lines = raw.split('\n').filter((l) => l.trim());
+    const idx = lines.findIndex((l) => {
+      const r = JSON.parse(l);
+      return r.app_id === 'app2';
+    });
+    const row = JSON.parse(lines[idx]);
+    row.status = 'tampered';
+    lines[idx] = JSON.stringify(row);
+    fs.writeFileSync(process.env.USAGE_FILE, lines.join('\n') + '\n');
+
+    const res = await request(app)
+      .get('/v1/audit')
+      .set('Authorization', `Bearer ${k.body.api_key}`);
+    expect(res.status).toBe(200);
+    // app1 chain still OK; app2 chain is broken.
+    expect(res.body.chain_ok_by_app.app1).toBe(true);
+    expect(res.body.chain_ok_by_app.app2).toBe(false);
+    expect(res.body.chain_ok).toBe(false);
+    expect(res.body.chain_break.app_id).toBe('app2');
+  });
+});

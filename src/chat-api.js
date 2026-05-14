@@ -151,6 +151,34 @@ function extractSchema(responseFormat) {
   return js.schema;
 }
 
+// Cheap-but-stable fingerprint of the request messages. Concatenates
+// role|content for every message and sha256s the result. The point is
+// to give the customer a way to spot duplicate-prompt traffic in their
+// audit log WITHOUT us having to store the prompt itself. For sealed
+// rows this fingerprint rides inside the envelope along with the
+// request_id (so even the fingerprint is not vendor-readable). For
+// bearer-only rows it stays in cleartext — the bearer customer already
+// chose the legacy posture.
+function promptFingerprint(messages) {
+  if (!Array.isArray(messages) || messages.length === 0) return null;
+  const buf = messages
+    .map((m) => `${(m && m.role) || ''}|${(m && m.content) || ''}`)
+    .join('\n');
+  const h = crypto.createHash('sha256').update(buf).digest('hex');
+  return `sha256:${h}`;
+}
+
+// Extract the schema "name" (json_schema.name) when present. Useful in
+// the audit row so customers can group rows by schema family; rides
+// inside the seal envelope alongside the fingerprint.
+function schemaName(responseFormat) {
+  if (!responseFormat || typeof responseFormat !== 'object') return null;
+  if (responseFormat.type !== 'json_schema') return null;
+  const js = responseFormat.json_schema;
+  if (!js || typeof js.name !== 'string') return null;
+  return js.name;
+}
+
 async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed }) {
   const payload = {
     model,
@@ -266,6 +294,13 @@ async function handleChatCompletions(req, res) {
       status: 'upstream_error',
       schema_enforced: Boolean(schema),
       request_id: requestId,
+      prompt_fingerprint: promptFingerprint(messages),
+      schema_name: schemaName(body.response_format),
+      // Customer-sealed audit: if this customer issued an ed25519 key
+      // they got an x25519 pubkey, which we hold to seal each row's
+      // content fields. Bearer-only customers don't have one and the
+      // row stays cleartext (sealed:false) — explicit, not silent.
+      x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
     });
     return res.status(502).json({
       error: { message: 'Upstream inference engine unreachable', type: 'upstream_error' },
@@ -288,6 +323,9 @@ async function handleChatCompletions(req, res) {
       status: 'upstream_' + upstream.status,
       schema_enforced: Boolean(schema),
       request_id: requestId,
+      prompt_fingerprint: promptFingerprint(messages),
+      schema_name: schemaName(body.response_format),
+      x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
     });
     return res.status(502).json({
       error: {
@@ -315,6 +353,9 @@ async function handleChatCompletions(req, res) {
     status: 'success',
     schema_enforced: Boolean(schema),
     request_id: requestId,
+    prompt_fingerprint: promptFingerprint(messages),
+    schema_name: schemaName(body.response_format),
+    x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
   });
 
   sendSignedJson(req, res, {

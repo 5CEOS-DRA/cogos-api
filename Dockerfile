@@ -11,10 +11,14 @@
 #   - Read-only-root-filesystem ready: only /app/data needs to be
 #     writable, and it is intended to be a mounted volume in prod
 #     (run with `--read-only --tmpfs /tmp -v cogos-data:/app/data`).
-# The builder stage is still node:20-alpine because `npm ci` needs
-# npm and a shell; that stage is discarded and never reaches prod.
+# The builder stage uses Microsoft's devcontainers Node image to avoid
+# Docker Hub's unauthenticated pull rate limit, which is shared across
+# all `az acr build` traffic and caused repeated deploy failures in
+# May 2026. MCR has no rate limit on authenticated Azure builds.
+# That stage is discarded and never reaches prod, so the size doesn't
+# matter — only that it has npm + a shell to run `npm ci`.
 
-FROM node:20-alpine AS deps
+FROM mcr.microsoft.com/devcontainers/javascript-node:20-bookworm AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev \

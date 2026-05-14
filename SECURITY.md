@@ -74,7 +74,6 @@ Good-faith research that:
 
 | Surface | Where to look |
 |---|---|
-| Gateway code in this repo | [`github.com/5CEOS-DRA/cogos-api`](https://github.com/5CEOS-DRA/cogos-api) |
 | Deployed production endpoints | `https://cogos.5ceos.com/*` |
 | Public landing, demo, and whitepaper pages | `/`, `/demo`, `/whitepaper` |
 | Health endpoint | `/health` |
@@ -92,7 +91,7 @@ Good-faith research that:
 | Third-party model weights (Qwen 2.5, any future open-weight model we serve) | Upstream of us. Report at the model author's tracker. |
 | Customer-side key compromise (their laptop, their CI, their secret manager) | We can't help if their key is leaked. We **can** revoke a key on request — see `/admin/keys/:id/revoke`. |
 | Social engineering of 5CEOS staff or customers | Out-of-band; report to `support@5ceos.com` with `[SECURITY]` subject prefix as standard abuse if you observe it, but it's not a code-defect bounty target. |
-| Physical access to 5CEOS infrastructure | Not in the threat model of an OSS gateway. |
+| Physical access to 5CEOS infrastructure | Not in the threat model of this gateway; report at the platform-provider level (Azure). |
 | Volumetric denial of service (L3/L4 floods, hash collision floods, etc.) | Handled at the Cloudflare edge; report via [Cloudflare's abuse flow](https://www.cloudflare.com/abuse/) so the trace data lands in the right place. |
 | Issues in third-party OSS dependencies (Express, Stripe SDK, etc.) | Report **upstream first**, then ping us so we can pull the patched version once published. |
 | Hosted inference providers we forward to (when `UPSTREAM_PROVIDER=openai` points at someone else's API) | Their security boundary, not ours. |
@@ -103,20 +102,9 @@ Good-faith research that:
 
 Every claim below maps to a command you can run **right now** to check us. If a claim is rolling out and not fully shipped today, we say so explicitly and mark it `TODO`.
 
-### 3.1 OSS gateway source
+### 3.1 Production build provenance
 
-**Claim:** The gateway code you talk to in production is exactly the code in this repo. No closed-source business logic sits between the customer request and the inference engine on the audited path.
-
-**Verify:**
-
-```bash
-git clone https://github.com/5CEOS-DRA/cogos-api.git
-cd cogos-api
-# Inspect the request path:
-grep -n "v1/chat/completions" src/*.js
-```
-
-The deployed image is built from this tree via `scripts/deploy-update.sh`; the image-signing claim in §3.2 lets you bind a specific revision to a specific commit.
+**Claim:** Every deployed revision is built from a specific, identifiable commit in our internal source tree. The deployed image is built via `scripts/deploy-update.sh`; the cosign signature in §3.2 binds the running image to the build we ship. Customers and auditors who require source-read access for verification can request it under NDA via the disclosure channel in §1.
 
 ---
 

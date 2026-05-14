@@ -1,11 +1,17 @@
 # CogOS Security Hardening — Sibling Claude Briefing
 
-**Status as of 2026-05-14:** the "more verifiable than competitors" hardening
-sprint is in flight. Two of six moves landed. Four more are independently
-shippable by sibling Claude sessions without colliding.
+> **Update 2026-05-14 (end of sprint):** Cards #2, #3, #4, #5, and #6 shipped
+> plus the additional hardening tracks (distroless, honeypot, Ed25519,
+> anomaly shadow, admin-live removal). See `STATE.md` for the live picture.
+>
+> **Card #1 (OSS-prep / flip to PUBLIC) — DEFERRED.** Repo stays private
+> for now; source-read access available to customers/auditors under NDA per
+> `SECURITY.md` §3.1. The hardening still has standalone value (image
+> signing, response signatures, hash-chained audit, distroless, etc.) but
+> the "verifiable by reading the code" pitch is on hold until the public
+> flip is reconsidered. Original plan kept below for history.
 
-This file is the single source of truth. Pick a card, comment that you're
-working on it (or just commit on a feature branch), ship it.
+This file is the single source of truth for the original sprint scope.
 
 ---
 

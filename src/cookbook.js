@@ -51,6 +51,7 @@ const NAV = `<nav style="margin-bottom:18px;font-size:11px">
   <a href="/cookbook" style="color:#79c0ff">Cookbook</a>
   <a href="/demo">Demo</a>
   <a href="/whitepaper">Whitepaper</a>
+  <a href="/trust">Trust</a>
   <a href="/#pricing">Pricing</a>
   <a href="${BENCH_URL}">Bench</a>
 </nav>`;

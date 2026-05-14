@@ -10,7 +10,7 @@ The public API surface of **CogOS** — a **deterministic uptime loop** for prod
 2. **Constrained decode** — grammar-locked at the token level when a schema is supplied; non-conforming output is impossible, not retried
 3. **Schema-validated response** — bytes emitted match the schema by construction
 4. **Provenance event** — append-only record of upstream model, tokens, latency, request ID
-5. **Metered usage** — counted toward your plan's budget, observable via `/admin/live`
+5. **Metered usage** — counted toward your plan's budget, observable via `/admin/usage`
 
 Every step is deterministic by construction; every step is observable; the determinism is **audited** by an open public bench ([`llm-determinism-bench`](https://github.com/5CEOS-DRA/llm-determinism-bench)) that we re-run against the live inference path on a published cadence. Drift shows up in the CSV the same day, in public — no "trust us."
 
@@ -32,7 +32,6 @@ The upstream inference engine is interchangeable. Configure it via env vars (see
 | `GET` | `/admin/keys` | Admin | List issued keys (hashes never returned) |
 | `POST` | `/admin/keys/:id/revoke` | Admin | Soft-delete an API key |
 | `GET` | `/admin/usage` | Admin | Read the append-only usage log |
-| `GET` | `/admin/live` | — (key gate in browser) | Live traffic dashboard |
 
 ## Auth
 

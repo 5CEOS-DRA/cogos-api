@@ -16,8 +16,51 @@ const whitepaper = require('./whitepaper');
 const demo = require('./demo');
 const cookbook = require('./cookbook');
 
+// Strict security headers on every response. Strongest possible CSP given
+// our architecture: no third-party scripts, no SPA, no marketing tags. The
+// only inline script on the customer-facing surface is the "Copy key" button
+// on /success — refactored to load from /js/copy.js so script-src can stay
+// 'self'-only without 'unsafe-inline'.
+//
+// CSP grade target: A+ on Mozilla Observatory.
+function securityHeaders(_req, res, next) {
+  res.setHeader('Content-Security-Policy', [
+    "default-src 'none'",
+    "script-src 'self'",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data:",
+    "form-action 'self' https://checkout.stripe.com",
+    "base-uri 'none'",
+    "frame-ancestors 'none'",
+    "connect-src 'self'",
+  ].join('; '));
+  res.setHeader('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()');
+  res.setHeader('Cross-Origin-Opener-Policy', 'same-origin');
+  res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+  next();
+}
+
+// Trivial copy-to-clipboard helper. Lives at /js/copy.js so we can keep
+// CSP's script-src 'self' without any inline-script exception.
+const COPY_JS = `(function(){
+  document.querySelectorAll('[data-copy]').forEach(function(btn){
+    btn.addEventListener('click', function(){
+      var t = btn.getAttribute('data-copy');
+      if (navigator.clipboard) navigator.clipboard.writeText(t);
+    });
+  });
+})();`;
+
 function createApp() {
   const app = express();
+  app.use(securityHeaders);
+  app.get('/js/copy.js', (_req, res) => {
+    res.type('application/javascript').send(COPY_JS);
+  });
 
   // Stripe webhook NEEDS raw body for signature verification. Mount BEFORE
   // express.json() so the body parser doesn't consume the stream first.

@@ -38,13 +38,12 @@ function renderPricingPill(pkg) {
   </div>`;
 }
 
-// The Enterprise pill is a static, sales-led offering — it is NOT a Stripe
-// package because Enterprise contracts are negotiated (region pinning,
-// dedicated GPU, MSA, SLA add-ons). The number is published on the page
-// for honesty per Denny's directive ("show the enterprise prices and not
-// hide it like the others"). No CTA — the price + description signal
-// the tier exists; interested parties contact enterprise@5ceos.com via
-// the footer or directly.
+// The Enterprise pill is a static offering — it is NOT a Stripe package
+// because Enterprise contracts are negotiated (region pinning, dedicated
+// GPU, MSA, SLA add-ons). The number is published on the page for honesty
+// (operator directive: "show the enterprise prices, don't hide them"). No
+// CTA — the price + description signal the tier exists; interested parties
+// contact support@5ceos.com.
 const ENTERPRISE_PILL_HTML = `
   <div class="pill" style="border-color:#58a6ff;background:#0d1f33">
     <div class="head">Enterprise</div>
@@ -334,7 +333,8 @@ function successHtml({ apiKey, keyId, expiresAt, sessionId }) {
   const portalHref = sessionId ? `/portal?session_id=${encodeURIComponent(sessionId)}` : null;
   const keyBlock = apiKey
     ? `<pre id="apikey"><code>${apiKey}</code></pre>
-       <button onclick="navigator.clipboard.writeText('${apiKey}')" class="cta">Copy key</button>
+       <button data-copy="${apiKey}" class="cta">Copy key</button>
+       <script src="/js/copy.js" defer></script>
        <div class="warn">⚠ This key is displayed for 24 hours after issuance. Save it now — after the window closes, the key remains valid but cannot be re-displayed.
        (Display window expires at ${expiresAt}.)</div>`
     : `<div class="warn">The 24-hour display window for this key has closed.

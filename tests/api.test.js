@@ -70,13 +70,17 @@ describe('admin: key issuance', () => {
     expect(res.status).toBe(401);
   });
 
-  test('POST /admin/keys with admin key + tenant_id → 201 + sk-cogos- prefix', async () => {
+  test('POST /admin/keys with admin key + tenant_id → 201 + sk-cogos- prefix + hmac_secret', async () => {
     const app = buildApp();
     const body = await issueKey(app, 'denny', 'starter');
     expect(body.api_key).toMatch(/^sk-cogos-[a-f0-9]{32}$/);
     expect(body.tenant_id).toBe('denny');
     expect(body.tier).toBe('starter');
-    expect(body.warning).toMatch(/Save this key now/);
+    expect(body.warning).toMatch(/Save this key/);
+    // hmac_secret must be on the response so customers can verify
+    // X-Cogos-Signature. Missed this in the original HMAC card; pentest
+    // 2026-05-14 surfaced it.
+    expect(body.hmac_secret).toMatch(/^[a-f0-9]{64}$/);
   });
 
   test('GET /admin/keys → list excludes key_hash', async () => {

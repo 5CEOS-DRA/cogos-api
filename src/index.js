@@ -370,17 +370,22 @@ function createApp() {
     } catch (e) {
       return res.status(400).json({ error: { message: e.message } });
     }
-    const { plaintext, private_pem, pubkey_pem, ed25519_key_id, record } = issued;
+    const { plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id, record } = issued;
     logger.info('key_issued', { id: record.id, tenant_id, tier, scheme: requestedScheme });
 
     // Common response fields; the scheme-specific secrets are added below.
+    // hmac_secret is on the common branch because every customer (regardless
+    // of bearer vs ed25519 auth) gets HMAC-signed /v1 responses they should
+    // be able to verify. Without it on this response, operator-issued keys
+    // have no way to verify the X-Cogos-Signature header.
     const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
       tier: record.tier,
       scheme: requestedScheme,
       issued_at: record.issued_at,
-      warning: 'Save this key now. It will not be shown again.',
+      hmac_secret, // shown ONCE; used to verify X-Cogos-Signature on /v1/*
+      warning: 'Save this key + hmac_secret now. They will not be shown again.',
     };
     if (requestedScheme === 'bearer') {
       response.api_key = plaintext; // shown ONCE; never retrievable again

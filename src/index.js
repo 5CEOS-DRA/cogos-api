@@ -18,6 +18,7 @@ const cookbook = require('./cookbook');
 const trust = require('./trust');
 const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
+const soc2 = require('./soc2');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -495,6 +496,31 @@ function createApp() {
       res.status(status).json({
         error: { message: e.message, type: e.code || 'delete_failed' },
       });
+    }
+  });
+
+  // ---- SOC 2 evidence-collection endpoints (X-Admin-Key gated) ----
+  // The /admin/soc2/* routes are operator-only surfaces an auditor invokes
+  // to capture a point-in-time snapshot of the live environment. Both use
+  // the existing adminAuth middleware; neither emits env-var VALUES or
+  // customer secrets. See src/soc2.js and docs/soc2/README.md §3.
+  app.get('/admin/soc2/evidence-bundle', adminAuth, (_req, res) => {
+    try {
+      const bundle = soc2.buildEvidenceBundle();
+      res.json(bundle);
+    } catch (e) {
+      logger.error('soc2_evidence_bundle_failed', { error: e.message });
+      res.status(500).json({ error: { message: e.message, type: 'evidence_bundle_failed' } });
+    }
+  });
+
+  app.get('/admin/soc2/control-status', adminAuth, (_req, res) => {
+    try {
+      const status = soc2.readControlMapping();
+      res.json(status);
+    } catch (e) {
+      logger.error('soc2_control_status_failed', { error: e.message });
+      res.status(500).json({ error: { message: e.message, type: 'control_status_failed' } });
     }
   });
 

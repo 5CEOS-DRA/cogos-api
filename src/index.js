@@ -181,6 +181,11 @@ function createApp() {
   app.get('/terms', (_req, res) => res.type('html').send(legal.termsHtml()));
   app.get('/privacy', (_req, res) => res.type('html').send(legal.privacyHtml()));
   app.get('/aup', (_req, res) => res.type('html').send(legal.aupHtml()));
+  // Enterprise-grade addenda — templates only, counsel review required.
+  app.get('/dpa', (_req, res) => res.type('html').send(legal.dpaHtml()));
+  app.get('/baa', (_req, res) => res.type('html').send(legal.baaHtml()));
+  app.get('/gdpr', (_req, res) => res.type('html').send(legal.gdprArt28Html()));
+  app.get('/sub-processors', (_req, res) => res.type('html').send(legal.subProcessorsHtml()));
   app.get('/whitepaper', (_req, res) => res.type('html').send(whitepaper.whitepaperHtml()));
   app.get('/demo', (_req, res) => res.type('html').send(demo.demoHtml()));
   app.get('/cookbook', (_req, res) => res.type('html').send(cookbook.cookbookHtml()));

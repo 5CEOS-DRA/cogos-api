@@ -37,6 +37,19 @@ az acr build \
   .
 
 echo ""
+echo "[deploy] [1.5/3] cosign sign ${NEW_IMAGE}..."
+if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ]; then
+  if command -v cosign &>/dev/null; then
+    COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" || echo "[deploy] WARN: cosign sign exited non-zero — proceeding without enforcement (week-0 additive)"
+  else
+    echo "[deploy] WARN: cosign not installed locally — skipping sign step. brew install cosign"
+  fi
+else
+  echo "[deploy] WARN: COSIGN_KEY_FILE unset — image NOT signed."
+  echo "[deploy]       Run once to set up: cosign generate-key-pair && export COSIGN_KEY_FILE=\$PWD/cosign.key"
+fi
+
+echo ""
 echo "[deploy] [2/3] az containerapp update (revision roll, ~30s)..."
 az containerapp update \
   --subscription "${SUB}" -g "${RG}" -n "${APP_NAME}" \
@@ -57,3 +70,7 @@ echo ""
 echo "[deploy] all 4 lines above should read 200."
 echo "[deploy] rollback if needed:"
 echo "  az containerapp update --subscription ${SUB} -g ${RG} -n ${APP_NAME} --image ${CURRENT_IMAGE}"
+
+echo ""
+echo "[deploy] customer-visible verify command:"
+echo "  cosign verify --key https://cogos.5ceos.com/cosign.pub ${NEW_IMAGE}"

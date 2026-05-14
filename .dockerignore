@@ -13,3 +13,5 @@ tests
 .vscode
 README.md
 deploy
+# Keep scripts/ in the image: the continuous-pentest Container App Job
+# overrides CMD to "scripts/probes-unauth.js" and needs the file present.

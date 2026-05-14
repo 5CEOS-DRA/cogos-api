@@ -29,6 +29,7 @@ WORKDIR /app
 COPY --from=deps --chown=nonroot:nonroot /app/node_modules ./node_modules
 COPY --from=deps --chown=nonroot:nonroot /app/data ./data
 COPY --chown=nonroot:nonroot src ./src
+COPY --chown=nonroot:nonroot scripts ./scripts
 COPY --chown=nonroot:nonroot package.json ./
 ENV NODE_ENV=production \
     PORT=4444

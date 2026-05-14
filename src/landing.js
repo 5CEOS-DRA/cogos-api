@@ -53,21 +53,55 @@ const ENTERPRISE_PILL_HTML = `
     <div class="price-sub">Real deals close at $100K–$250K depending on add-ons (extra GPUs, 99.95% SLA, on-prem deployment, dedicated CSM).</div>
   </div>`;
 
+// A package is an add-on (not a tier) when it carries 0 inference quota.
+// Add-ons stack on top of any tier — they sell features (retention,
+// exports, compliance paperwork), not inference capacity.
+function isAddOn(pkg) {
+  return (pkg.monthly_request_quota || 0) === 0;
+}
+
 function renderPricingSection(packages) {
+  const tiers = (packages || []).filter((p) => !isAddOn(p));
   let pillsHtml;
-  if (!packages || packages.length === 0) {
+  if (tiers.length === 0) {
     pillsHtml = `
   <div class="pill">
     <div class="head">Self-serve tiers — setup pending</div>
     <div class="price-sub">No self-serve packages configured yet. The operator will set these from the Management Console. Enterprise is always available below.</div>
   </div>`;
   } else {
-    pillsHtml = packages
+    pillsHtml = tiers
       .sort((a, b) => (a.monthly_usd || 0) - (b.monthly_usd || 0))
       .map(renderPricingPill)
       .join('\n');
   }
   return pillsHtml + ENTERPRISE_PILL_HTML;
+}
+
+function renderAddOnPill(pkg) {
+  const desc = pkg.description ? escapeHtml(pkg.description) : '';
+  const priceLabel = `$${Number(pkg.monthly_usd).toLocaleString('en-US')}/mo`;
+  return `
+  <div class="pill" style="border-color:#d29922;background:#1a1410">
+    <div class="head" style="color:#d29922">${escapeHtml(pkg.display_name)} · add-on</div>
+    <div class="price" style="color:#d29922">${priceLabel}</div>
+    ${desc ? `<div class="price-sub" style="margin-bottom:14px">${desc}</div>` : ''}
+    <form action="/signup?package=${encodeURIComponent(pkg.id)}" method="POST" style="margin:0">
+      <button class="cta" type="submit" style="background:#d29922">Add to subscription →</button>
+    </form>
+  </div>`;
+}
+
+function renderAddOnsSection(packages) {
+  const addons = (packages || []).filter(isAddOn);
+  if (addons.length === 0) return '';
+  return `
+  <h2>Add-ons</h2>
+  <p style="color:#8b949e;font-size:13px;margin:0 0 14px">
+    Stack on top of any base tier. Bought as a separate Stripe subscription &mdash; same email, same tenant, same gateway.
+  </p>
+  ${addons.sort((a, b) => (a.monthly_usd || 0) - (b.monthly_usd || 0)).map(renderAddOnPill).join('\n')}
+`;
 }
 
 function renderAtLimitFaq(packages) {
@@ -88,7 +122,8 @@ function renderAtLimitFaq(packages) {
 
 function renderLandingHtml(packages = []) {
   const PRICING_HTML = renderPricingSection(packages);
-  const AT_LIMIT_FAQ_HTML = renderAtLimitFaq(packages);
+  const ADDONS_HTML = renderAddOnsSection(packages);
+  const AT_LIMIT_FAQ_HTML = renderAtLimitFaq(packages.filter((p) => !isAddOn(p)));
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -240,6 +275,8 @@ function renderLandingHtml(packages = []) {
 
   <h2>Pricing</h2>
 ${PRICING_HTML}
+
+${ADDONS_HTML}
 
   <h2>Try it in 30 seconds (after signup)</h2>
 

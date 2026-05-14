@@ -136,7 +136,22 @@ echo "============================================================"
 echo "[probes-unauth] $PASS pass, $FAIL fail"
 if [ "$FAIL" -gt 0 ]; then
   for line in "${FAIL_LINES[@]}"; do echo "  - $line"; done
-  exit 1
 fi
-echo "[probes-unauth] all unauth probes clean."
+[ "$FAIL" -eq 0 ] && echo "[probes-unauth] all unauth probes clean."
 echo "============================================================"
+
+# If PROBE_HISTORY_FILE is set (typically inside the Container App Job
+# with /app/data/probe-history.jsonl, shared via Azure Files with the
+# gateway), append a one-line JSONL summary so /trust can render the
+# last automated run. Survives across job invocations.
+if [ -n "${PROBE_HISTORY_FILE:-}" ]; then
+  TS_ISO=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  FAIL_LIST_JSON=$(printf '%s\n' "${FAIL_LINES[@]:-}" | jq -R . | jq -s . 2>/dev/null || echo "[]")
+  STATUS=$([ "$FAIL" -eq 0 ] && echo "pass" || echo "fail")
+  mkdir -p "$(dirname "$PROBE_HISTORY_FILE")" 2>/dev/null || true
+  printf '{"ts":"%s","kind":"probes-unauth","status":"%s","pass":%d,"fail":%d,"failures":%s,"host":"%s"}\n' \
+    "$TS_ISO" "$STATUS" "$PASS" "$FAIL" "$FAIL_LIST_JSON" "$HOST" \
+    >> "$PROBE_HISTORY_FILE" || true
+fi
+
+[ "$FAIL" -eq 0 ] || exit 1

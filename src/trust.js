@@ -282,6 +282,29 @@ function renderPentestSection(state) {
 </table>`;
 }
 
+function renderContinuousProbes(s) {
+  const p = s.latestProbe;
+  if (!p) {
+    return `<p>An Azure Container App Job runs <code>scripts/probes-unauth.sh</code> against this domain on a daily schedule (no auth, no third-party services in the loop). The latest run will appear here once the job has executed once. Probe source: <code>scripts/probes-unauth.sh</code> and <code>scripts/pentest-authed.sh</code> in the repo.</p>`;
+  }
+  const total = (Number(p.pass) || 0) + (Number(p.fail) || 0);
+  const ok = (Number(p.fail) || 0) === 0;
+  const badge = ok
+    ? `<span style="color:#3fb950;font-weight:600">PASS</span>`
+    : `<span style="color:#f85149;font-weight:600">FAIL</span>`;
+  const failures = (p.failures && p.failures.length)
+    ? `<details><summary style="cursor:pointer">${p.failures.length} failing check(s)</summary><ul>${p.failures.map((f) => `<li><code>${String(f).replace(/[<>&]/g, (c) => ({ '<':'&lt;','>':'&gt;','&':'&amp;' }[c]))}</code></li>`).join('')}</ul></details>`
+    : '';
+  return `<p>An Azure Container App Job runs <code>scripts/probes-unauth.sh</code> against this domain on a daily schedule. Results below; raw log appended to <code>data/probe-history.jsonl</code>.</p>
+<table>
+  <tr><th>Last run</th><td>${p.ts || 'unknown'}</td></tr>
+  <tr><th>Status</th><td>${badge} &mdash; ${p.pass || 0} / ${total} probes</td></tr>
+  <tr><th>Probe set</th><td><code>${p.kind || 'probes-unauth'}</code></td></tr>
+  <tr><th>Target</th><td><code>${p.host || 'cogos.5ceos.com'}</code></td></tr>
+</table>
+${failures}`;
+}
+
 function trustHtml(state) {
   const s = state || {};
   const body = `
@@ -302,6 +325,9 @@ ${renderRevisionsSection(s)}
 
 <h2>Published security advisories</h2>
 ${renderAdvisoriesSection(s)}
+
+<h2>Continuous probes</h2>
+${renderContinuousProbes(s)}
 
 <h2>Pentest summary</h2>
 ${renderPentestSection(s)}
@@ -380,6 +406,24 @@ function loadPentestHistory() {
   }
 }
 
+// Read the latest line of the probe-history JSONL (written by the
+// continuous-pentest Container App Job) so /trust can render the most
+// recent automated probe result. File absence is the expected state
+// before the job has run once.
+function loadLatestProbe() {
+  const filePath = process.env.PROBE_HISTORY_FILE
+    || path.join(process.cwd(), 'data', 'probe-history.jsonl');
+  try {
+    const raw = fs.readFileSync(filePath, 'utf8');
+    const lines = raw.trim().split('\n').filter(Boolean);
+    if (lines.length === 0) return null;
+    // Last line is most recent (append-only log)
+    return JSON.parse(lines[lines.length - 1]);
+  } catch {
+    return null;
+  }
+}
+
 function buildTrustState({ healthOk = true } = {}) {
   let pkgVersion = '0.1.0';
   try {
@@ -396,6 +440,7 @@ function buildTrustState({ healthOk = true } = {}) {
     cosign: cosignState(),
     advisories: [], // none published; do not fabricate
     pentestHistory: loadPentestHistory(),
+    latestProbe: loadLatestProbe(),
     renderedAt: new Date().toISOString(),
   };
 }

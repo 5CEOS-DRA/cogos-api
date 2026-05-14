@@ -128,7 +128,7 @@ async function handleCheckoutCompleted(event) {
   const packageId = (session.metadata && session.metadata.cogos_package_id) || null;
   const pkg = packageId ? packages.get(packageId) : packages.getDefault();
 
-  const { plaintext, record } = keys.issue({
+  const { plaintext, hmac_secret, record } = keys.issue({
     tenantId,
     label: 'self-serve via Stripe',
     tier: (pkg && pkg.id) || 'starter',
@@ -171,6 +171,7 @@ async function handleCheckoutCompleted(event) {
     session_id: session.id,
     key_id: record.id,
     plaintext_short_lived: plaintext,
+    hmac_secret_short_lived: hmac_secret,
     plaintext_expires_at: new Date(Date.now() + 24 * 60 * 60_000).toISOString(),
   });
 
@@ -277,6 +278,7 @@ function getNewlyIssuedKey(sessionId) {
   if (evt.plaintext_expires_at && Date.parse(evt.plaintext_expires_at) < Date.now()) return null;
   return {
     api_key: evt.plaintext_short_lived,
+    hmac_secret: evt.hmac_secret_short_lived || null,
     key_id: evt.key_id,
     expires_at: evt.plaintext_expires_at,
   };

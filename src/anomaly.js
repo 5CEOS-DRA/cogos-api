@@ -3,16 +3,23 @@
 // Anomaly detector middleware. Security Hardening Card #5 — anti-tamper /
 // cheat-detection pillar, lightweight in-process form.
 //
-// SHADOW MODE — this file's contract.
+// TWO MODES.
 //
-//   The detector observes request/response shape, increments in-memory
-//   per-subject counters over sliding 60-second windows, and APPENDS one
-//   line to data/anomalies.jsonl every time a threshold is crossed. It
-//   does NOT block, rewrite, or fail any request — the response that left
-//   the wire is exactly what the upstream middleware decided.
+//   Default (ANOMALY_FAIL_CLOSED unset or != '1'):
+//     The detector observes request/response shape, increments in-memory
+//     per-subject counters over sliding 60-second windows, and APPENDS one
+//     line to data/anomalies.jsonl every time a threshold is crossed. It
+//     does NOT block, rewrite, or fail any request — the response that
+//     left the wire is exactly what the upstream middleware decided.
 //
-//   A future card flips it to fail-closed (e.g. rate-limit response,
-//   429 reply). The seams for that flip are marked TODO_FAIL_CLOSED.
+//   Fail-closed (ANOMALY_FAIL_CLOSED=1):
+//     Same observe / log path, AND on certain IP-scoped fires the IP
+//     gets a soft-ban (auth-brute-force = 5 min, scanner = 15 min). The
+//     ban is read by rate-limit-by-ip (src/rate-limit.js) which short-
+//     circuits banned IPs to 429 with Retry-After. Tenant- and global-
+//     scoped fires (schema_failure_spike, latency_drift_detected) stay
+//     log-only regardless of mode — they would punish paying customers
+//     or every caller for an upstream blip, not an attacker.
 //
 // Signals (parallel to SECURITY_HARDENING_PLAN.md card #5):
 //   a) auth_4xx_rate          per-IP    401/403 in 60s            > 10
@@ -63,6 +70,28 @@ const BUCKET_TTL_MS = Number(process.env.ANOMALY_BUCKET_TTL_MS || 5 * 60_000);
 // cap is hit we evict the least-recently-touched bucket. 50_000 covers any
 // realistic operator load while keeping memory bounded.
 const MAX_BUCKETS = Number(process.env.ANOMALY_MAX_BUCKETS || 50_000);
+
+// Fail-closed enforcement. Default OFF — calibrate thresholds against real
+// traffic in shadow mode before flipping. When set, fire() of certain kinds
+// stamps a per-IP ban into the `bans` Map; isBlocked(ip) is the read side
+// the rate-limit middleware consults. schema_failure_spike + latency_drift
+// stay log-only regardless — they're per-tenant / global signals and would
+// punish paying customers for an upstream blip, not an attacker. Read
+// LAZILY (via shouldFailClose()) so test files can toggle the env between
+// runs without restarting the module.
+function shouldFailClose() {
+  return process.env.ANOMALY_FAIL_CLOSED === '1';
+}
+
+// Ban durations per fired kind. Auth brute-force is suggestive but not
+// unambiguous (could be a misconfigured SDK), so 5 minutes. Scanner traffic
+// (3+ honeypot hits) is unambiguous, so 15 minutes.
+const BAN_MS_AUTH = 5 * 60_000;
+const BAN_MS_SCANNER = 15 * 60_000;
+
+// Cap on ban entries to bound memory under a key-rotation attack.
+const MAX_BANS = 10_000;
+const bans = new Map(); // ip -> blockedUntilMs
 
 const THRESHOLDS = Object.freeze({
   // Per-IP — 10/min translates to one auth-failure every 6s. Real customers
@@ -230,8 +259,51 @@ function fire(bucket, kind, severity, now, contextExtra) {
     count,
     threshold,
     context: contextExtra || {},
+    enforced: shouldFailClose() && bucket.type === 'ip'
+      && (kind === 'auth_brute_force_suspected' || kind === 'scanner_active'),
   });
+  // Fail-closed enforcement. Only IP-scoped kinds set bans: auth-brute-
+  // force (5 min) and scanner-active (15 min). Tenant- and global-scoped
+  // signals never ban — they would punish paying customers / the whole
+  // surface for a partial-upstream issue.
+  if (shouldFailClose() && bucket.type === 'ip') {
+    let banMs = 0;
+    if (kind === 'auth_brute_force_suspected') banMs = BAN_MS_AUTH;
+    else if (kind === 'scanner_active') banMs = BAN_MS_SCANNER;
+    if (banMs > 0) {
+      setBan(bucket.value, now + banMs);
+    }
+  }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Ban map. Read-side is isBlocked(ip); write-side is setBan(ip, untilMs).
+// ---------------------------------------------------------------------------
+function setBan(ip, untilMs) {
+  // LRU eviction at MAX_BANS — Map insertion order, re-insert on every set.
+  bans.delete(ip);
+  while (bans.size >= MAX_BANS) {
+    const oldestKey = bans.keys().next().value;
+    if (oldestKey === undefined) break;
+    bans.delete(oldestKey);
+  }
+  bans.set(ip, untilMs);
+  logger.warn('anomaly_ban_set', { ip, until_ms: untilMs, duration_ms: untilMs - Date.now() });
+}
+
+// Read side. Returns the blocked-until-ms timestamp if the IP is banned,
+// or 0 if not. Cleans up expired entries opportunistically. NEVER throws.
+function isBlocked(ip) {
+  if (!ip) return 0;
+  const until = bans.get(ip);
+  if (!until) return 0;
+  const now = Date.now();
+  if (until <= now) {
+    bans.delete(ip);
+    return 0;
+  }
+  return until;
 }
 
 // ---------------------------------------------------------------------------
@@ -409,12 +481,18 @@ function observe(req, res, startMs) {
 const _test = {
   reset() {
     buckets.clear();
+    bans.clear();
     latency.currentMs = null;
     latency.currentSamples = [];
     latency.history = [];
     latency.lastFiredAtMinuteMs = 0;
     lastSweepMs = 0;
   },
+  forceBan(ip, ms) {
+    setBan(ip, Date.now() + ms);
+  },
+  bansCount() { return bans.size; },
+  isFailClosed() { return shouldFailClose(); },
   getCounter(subjectType, subjectValue, kind) {
     const b = buckets.get(bucketKey(subjectType, subjectValue));
     if (!b) return 0;
@@ -457,12 +535,15 @@ const _test = {
 
 module.exports = middleware;
 module.exports.middleware = middleware;
+module.exports.isBlocked = isBlocked;
 module.exports._test = _test;
 
-// TODO_FAIL_CLOSED: when this card flips to enforcement, hoist a config
-// flag (e.g. ANOMALY_ENFORCE=1) and on fire() inside observe(), short-
-// circuit *future* requests from the same subject with 429 for a cooldown
-// window. The seam is `fire()` returning true on a brand-new fire — read
-// that signal and stash a `blockedUntilMs` on the bucket. Response would
-// then be set by a separate gate middleware that runs PRE-handler. Two-
-// middleware structure (observe + gate) keeps the shadow path untouched.
+// FAIL_CLOSED (2026-05-14, pentest F2): when ANOMALY_FAIL_CLOSED=1 is set,
+// fire() of IP-scoped kinds (auth_brute_force_suspected, scanner_active)
+// stamps a per-IP ban into `bans` via setBan(). The rate-limit middleware
+// (src/rate-limit.js) calls isBlocked(ip) at the head of every request
+// and short-circuits to 429 with Retry-After while a ban is active.
+// Shadow path is untouched: anomaly observer still runs at res.on('finish');
+// the gate runs inside rate-limit-by-ip which sits between the observer
+// and the rest of the stack. Tenant- and global-scoped signals are
+// log-only by design (don't punish paying customers for an upstream blip).

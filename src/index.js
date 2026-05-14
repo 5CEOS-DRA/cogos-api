@@ -18,6 +18,7 @@ const cookbook = require('./cookbook');
 const trust = require('./trust');
 const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
+const { rateLimitByIp, rateLimitByTenant } = require('./rate-limit');
 const soc2 = require('./soc2');
 
 // Strict security headers on every response. Strongest possible CSP given
@@ -65,24 +66,40 @@ function createApp() {
   app.set('trust proxy', 1);
   app.use(securityHeaders);
 
-  // Anomaly detector — Security Hardening Card #5, SHADOW MODE.
+  // Anomaly detector — Security Hardening Card #5.
   //
   // Mounted FIRST in the data path (after securityHeaders, before honeypot)
   // so res.on('finish') is registered on EVERY request — including those
   // that honeypot terminates without calling next(). The observer reads
   // the final response status code, the resolved req.ip (trust proxy is
   // set above), and req.apiKey (when bearerAuth sets it later on
-  // /v1/* routes). Shadow mode: this middleware never alters the response.
+  // /v1/* routes). Default shadow mode; ANOMALY_FAIL_CLOSED=1 enables
+  // threshold-tripped bans which the per-IP rate limiter consults below.
   app.use(anomaly);
 
+  // Per-IP rate limit — defense-in-depth against floods on every
+  // unauthenticated path (health, /v1/* 401 reject, /admin/* 401 reject,
+  // honeypots). Also short-circuits anomaly-banned IPs to 429. Order:
+  // anomaly observer first so its res.on('finish') is registered before
+  // we possibly short-circuit; honeypot AFTER the limiter so a scanner
+  // hammering canary paths still gets throttled (otherwise the honeypot
+  // is unlimited and pure CPU burn for us). See pentest F2 (2026-05-14).
+  app.use(rateLimitByIp({ label: 'global' }));
+
   // Honeypot middleware. Mounted EARLY — after securityHeaders + anomaly
-  // observer so the CSP/HSTS still apply to fake responses and the anomaly
-  // detector sees the hit, but before the JSON body parser and before every
-  // real route. Intercepts scanner-target paths (/.env, /.git/*, /wp-admin,
+  // observer + per-IP limiter so the CSP/HSTS still apply to fake
+  // responses, the anomaly detector sees the hit, and floods are
+  // throttled — but before the JSON body parser and before every real
+  // route. Intercepts scanner-target paths (/.env, /.git/*, /wp-admin,
   // /api/v0/*, etc) and returns plausible-looking-but-obviously-canary
-  // responses. Every hit is logged at WARN level. See src/honeypot.js for
-  // the path table.
+  // responses. Every hit is logged at WARN level. See src/honeypot.js
+  // for the path table.
   app.use(honeypot);
+
+  // Stricter per-IP limit on /admin/*. Operator dashboards shouldn't be
+  // flooded — 30/min is well above interactive use and well below brute
+  // force. Pre-empts the global 100/min by mounting earlier in the path.
+  app.use('/admin', rateLimitByIp({ limit: 30, label: 'admin' }));
 
   app.get('/js/copy.js', (_req, res) => {
     res.type('application/javascript').send(COPY_JS);
@@ -300,8 +317,15 @@ function createApp() {
   // customerAuth = ed25519-first, bearer-fallback. Either scheme attaches
   // req.apiKey on success; the chained handlers read req.apiKey.tenant_id
   // without caring which substrate authenticated the request.
-  app.get('/v1/models', customerAuth, handleListModels);
-  app.post('/v1/chat/completions', customerAuth, enforcePackage, handleChatCompletions);
+  //
+  // rateLimitByTenant runs AFTER customerAuth so req.apiKey.tenant_id is
+  // populated. Default is 1000 req/min/tenant — generous for real workloads
+  // (16+ rps sustained) and tight enough that a leaked key can't single-
+  // handedly fill the inference queue. Per-IP limit already absorbed the
+  // anonymous-flood case upstream.
+  const tenantLimiter = rateLimitByTenant();
+  app.get('/v1/models', customerAuth, tenantLimiter, handleListModels);
+  app.post('/v1/chat/completions', customerAuth, tenantLimiter, enforcePackage, handleChatCompletions);
 
   // ---- Customer-facing audit query (Security Hardening Card #3) ----
   // Returns the requesting tenant's hash-chained usage rows. Strictly
@@ -317,7 +341,7 @@ function createApp() {
   // The public `/audit/checkpoint/<ts>` endpoint and Azure Blob
   // integration are intentionally NOT built in this branch — they're
   // a separate card in SECURITY_HARDENING_PLAN.md.
-  app.get('/v1/audit', customerAuth, (req, res) => {
+  app.get('/v1/audit', customerAuth, tenantLimiter, (req, res) => {
     const sinceMs = Number(req.query.since || 0);
     const limitRaw = Number(req.query.limit || 100);
     if (!Number.isFinite(sinceMs) || sinceMs < 0) {

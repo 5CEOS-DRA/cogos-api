@@ -302,4 +302,109 @@ describe('anomaly detector — shadow mode', () => {
     expect(fire.context.ua).toBe('<script>alert(1)</script>');
     expect(fire.subject_value).not.toMatch(/<script>/);
   });
+
+  test('default mode (ANOMALY_FAIL_CLOSED unset) — fire does NOT ban; isBlocked stays 0', async () => {
+    // Shadow contract: even when the threshold is crossed, the IP is not
+    // banned and follow-on requests get the natural status, not 429.
+    delete process.env.ANOMALY_FAIL_CLOSED;
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    for (let i = 0; i < 11; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      const r = await request(app).get('/v1/models');
+      expect(r.status).toBe(401);
+    }
+    // The fire happened in shadow mode, but no ban was set.
+    expect(anom.isBlocked('::ffff:127.0.0.1')).toBe(0);
+    expect(anom.isBlocked('127.0.0.1')).toBe(0);
+    expect(anom._test.bansCount()).toBe(0);
+  });
+});
+
+describe('anomaly detector — fail-closed mode (ANOMALY_FAIL_CLOSED=1)', () => {
+  beforeEach(() => {
+    process.env.ANOMALY_FAIL_CLOSED = '1';
+    // Use a generous per-IP rate limit so 11 auth-failures don't 429 us
+    // before they fire the brute-force threshold.
+    process.env.RATE_LIMIT_IP_PER_MIN = '200';
+  });
+  afterEach(() => {
+    delete process.env.ANOMALY_FAIL_CLOSED;
+    delete process.env.RATE_LIMIT_IP_PER_MIN;
+  });
+
+  test('11 auth-4xx from one IP → IP is banned, next request returns 429', async () => {
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    // First 11 calls are 401 (no auth). The 11th crosses the threshold
+    // (strict >, threshold=10) and fires auth_brute_force_suspected,
+    // which in fail-closed mode sets a 5-min ban on the IP.
+    for (let i = 0; i < 11; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app).get('/v1/models');
+    }
+    // The next request from the same IP should now 429 (banned), not 401.
+    const r = await request(app).get('/v1/models');
+    expect(r.status).toBe(429);
+    expect(r.body.error.type).toBe('rate_limit_exceeded');
+    expect(Number(r.headers['retry-after'])).toBeGreaterThan(0);
+    // Ban duration is ~5 min so retry-after should be in (0, 300].
+    expect(Number(r.headers['retry-after'])).toBeLessThanOrEqual(300);
+    expect(anom._test.bansCount()).toBeGreaterThan(0);
+  });
+
+  test('4 honeypot hits → IP banned for 15 min', async () => {
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    await request(app).get('/.env');
+    await request(app).get('/wp-admin');
+    await request(app).get('/.git/config');
+    await request(app).get('/xmlrpc.php');
+    // 4 honeypots > threshold=3 → fires scanner_active → 15-min ban.
+    const r = await request(app).get('/health');
+    expect(r.status).toBe(429);
+    // 15 min = 900s; retry-after lives in (0, 900].
+    expect(Number(r.headers['retry-after'])).toBeGreaterThan(300);
+    expect(Number(r.headers['retry-after'])).toBeLessThanOrEqual(900);
+  });
+
+  test('schema_failure_spike (per-tenant) is log-only even in fail-closed mode', async () => {
+    const { app, anom } = freshPair();
+    anom._test.reset();
+    // Issue a key so we have a tenant.
+    const issue = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-pay', tier: 'starter' });
+    // Forge a per-tenant fire by manipulating the bucket counter past
+    // threshold and triggering observe via a non-200 chat completion.
+    // Simpler: just verify the helper says no IP is banned even though
+    // many tenant-scoped fires could happen. We can't trivially fire a
+    // schema_failure_spike from supertest without a working upstream;
+    // instead, force a ban via forceBan and verify it's IP-keyed, and
+    // verify the schema_violation counter increment doesn't change the
+    // bans count.
+    anom._test.forceBan('1.2.3.4', 1000);
+    expect(anom._test.bansCount()).toBe(1);
+    // Confirm only IP-scoped fires modify bans — emit a tenant counter
+    // bump and confirm bans count is unchanged.
+    anom._test.forceFire('schema_failure_spike');
+    expect(anom._test.bansCount()).toBe(1);
+    // And the issued key call doesn't 429 against the legit IP.
+    const r = await request(app)
+      .get('/v1/models')
+      .set('Authorization', `Bearer ${issue.body.api_key}`);
+    expect(r.status).not.toBe(429);
+  });
+
+  test('forceBan + isBlocked work as expected; ban expires past untilMs', async () => {
+    const { anom } = freshPair();
+    anom._test.reset();
+    anom._test.forceBan('10.0.0.1', 1000); // 1 second
+    expect(anom.isBlocked('10.0.0.1')).toBeGreaterThan(Date.now());
+    expect(anom.isBlocked('10.0.0.2')).toBe(0);
+    // Simulate expiry by forcing the ban into the past.
+    anom._test.forceBan('10.0.0.1', -1);
+    expect(anom.isBlocked('10.0.0.1')).toBe(0);
+  });
 });

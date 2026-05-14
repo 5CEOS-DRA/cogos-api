@@ -13,9 +13,13 @@ const COMPANY_LEGAL_NAME = '5CEOs, Inc.';
 const COMPANY_DISPLAY_NAME = '5CEOs';
 const PRODUCT_NAME = 'CogOS';
 const SERVICE_DOMAIN = 'cogos.5ceos.com';
+// Single customer-facing inbox at v1. Routing legal/privacy/abuse to the
+// same address until staffing/volume justifies separating them. Customer
+// can still reach us via the canonical support@5ceos.com from anywhere
+// these legal docs are linked.
 const SUPPORT_EMAIL = 'support@5ceos.com';
-const LEGAL_EMAIL = 'legal@5ceos.com';
-const PRIVACY_EMAIL = 'privacy@5ceos.com';
+const LEGAL_EMAIL = 'support@5ceos.com';
+const PRIVACY_EMAIL = 'support@5ceos.com';
 const GOVERNING_LAW = 'the State of Florida, United States of America';
 const LAST_UPDATED = '2026-05-12';
 
@@ -58,9 +62,8 @@ function wrapHtml(title, bodyHtml) {
   ${bodyHtml}
   <footer>
     ${PRODUCT_NAME} is operated by ${COMPANY_LEGAL_NAME}. Questions:
-    <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a> ·
-    <a href="mailto:${LEGAL_EMAIL}">${LEGAL_EMAIL}</a> ·
-    <a href="mailto:${PRIVACY_EMAIL}">${PRIVACY_EMAIL}</a>
+    <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>
+    (support, legal, privacy, abuse — all routed to one inbox while we're early)
   </footer>
 </main>
 </body>
@@ -368,7 +371,7 @@ Agreement on request.</p>
 <h2>5. Reporting Violations</h2>
 <p>If you believe another user is violating this AUP, or if you encounter
 Service output that violates this AUP, please report it to
-<a href="mailto:abuse@5ceos.com">abuse@5ceos.com</a> with relevant evidence
+<a href="mailto:support@5ceos.com">support@5ceos.com</a> with relevant evidence
 (request IDs from the <code>X-Cogos-Request-Id</code> response header are
 sufficient for our investigation).</p>
 
@@ -387,7 +390,7 @@ to time to address new categories of misuse.</p>
 <h2>7. Contact</h2>
 <p>Questions about acceptable use:
 <a href="mailto:${SUPPORT_EMAIL}">${SUPPORT_EMAIL}</a>.<br>
-Abuse reports: <a href="mailto:abuse@5ceos.com">abuse@5ceos.com</a>.</p>
+Abuse reports: <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</p>
 `;
 
 module.exports = {

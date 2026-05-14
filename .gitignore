@@ -8,3 +8,8 @@ coverage/
 .idea/
 .vscode/
 .claude/
+
+# cosign signing keys — private key NEVER committed; pubkey published via env
+cosign.key
+cosign.pub
+cosign.password

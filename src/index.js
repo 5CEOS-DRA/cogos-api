@@ -293,6 +293,11 @@ function createApp() {
   });
 
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
+  // TODO(week-1-finisher): the /admin/* routes below are slated for removal
+  // once the offline admin ceremony lands. See scripts/admin-ceremony/README.md
+  // for the migration target. They remain LIVE today because tooling depends on
+  // them; future card #7-admin-ceremony retires them in favor of signed config
+  // diffs that the server verifies on startup.
   app.post('/admin/keys', adminAuth, (req, res) => {
     const { tenant_id, label, tier } = req.body || {};
     if (!tenant_id) {

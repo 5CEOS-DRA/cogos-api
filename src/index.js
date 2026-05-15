@@ -471,6 +471,77 @@ function createApp() {
     });
   });
 
+  // ---- Customer-driven rotation (Security Hardening Card: key lifecycle) ----
+  //
+  // POST /v1/keys/rotate — customerAuth-gated (works with both bearer +
+  // ed25519). The caller MUST succeed authentication with their CURRENT
+  // key. We issue a new key of the same scheme (bearer → bearer
+  // plaintext; ed25519 → fresh ed25519 + x25519 keypair) inheriting
+  // tenant_id / app_id / tier / package_id and CRUCIALLY the parent's
+  // expires_at (rotation != renewal). The old record gets a 24h
+  // rotation_grace_until stamp; during the grace window both keys
+  // authenticate and the old key's responses carry X-Cogos-Key-Deprecated.
+  // After grace, verify() auto-revokes the old record on next touch.
+  //
+  // KNOWN GAP (TODO future card): an attacker who already has the old
+  // key can rotate it themselves — this protects against future leaks
+  // but not the leak that's already happened. A human-in-the-loop
+  // confirmation flow (email-the-original-customer-before-rotating)
+  // closes that hole and is a separate card.
+  //
+  // Response shape mirrors POST /admin/keys so customer SDKs / the
+  // cookbook recipe can share display logic.
+  app.post('/v1/keys/rotate', customerAuth, tenantLimiter, (req, res) => {
+    try {
+      const issued = keys.rotate(req.apiKey);
+      const {
+        plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id,
+        x25519_private_pem, x25519_pubkey_pem, record,
+        rotation_grace_until_iso, rotated_from_key_id,
+      } = issued;
+      logger.info('key_rotated', {
+        old_id: rotated_from_key_id,
+        new_id: record.id,
+        tenant_id: record.tenant_id,
+        app_id: record.app_id,
+        scheme: record.scheme,
+      });
+      const response = {
+        key_id: record.id,
+        tenant_id: record.tenant_id,
+        app_id: record.app_id,
+        tier: record.tier,
+        scheme: record.scheme,
+        issued_at: record.issued_at,
+        expires_at: record.expires_at,
+        rotated_from_key_id,
+        rotation_grace_until: rotation_grace_until_iso,
+        hmac_secret,
+        warning: `Old key remains valid until ${rotation_grace_until_iso}; `
+          + 'switch your client to the new key before then. Save the new '
+          + 'material now — it will not be shown again.',
+      };
+      if (record.scheme === 'bearer') {
+        response.api_key = plaintext;
+      } else {
+        response.ed25519_key_id = ed25519_key_id;
+        response.private_pem = private_pem;
+        response.pubkey_pem = pubkey_pem;
+        response.x25519_private_pem = x25519_private_pem;
+        response.x25519_pubkey_pem = x25519_pubkey_pem;
+      }
+      res.status(201).json(response);
+    } catch (e) {
+      logger.warn('key_rotate_failed', {
+        caller_id: req.apiKey && req.apiKey.id,
+        error: e.message,
+      });
+      res.status(400).json({
+        error: { message: e.message, type: 'rotation_failed' },
+      });
+    }
+  });
+
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
   // TODO(week-1-finisher): the /admin/* routes below are slated for removal
   // once the offline admin ceremony lands. See scripts/admin-ceremony/README.md

@@ -4,13 +4,15 @@ const crypto = require('node:crypto');
 const { verify, findByEd25519KeyId, touchLastUsed, PREFIX } = require('./keys');
 
 // Lifecycle gate shared by both bearer + ed25519 auth paths.
-// Returns null if the record is auth-OK. Returns {status, body} otherwise
-// so the caller can short-circuit to the right 401 with a precise
-// error.type. Distinct error.type values matter for customer-side
-// debugging — `expired_api_key` is the actionable form of
-// `invalid_api_key` (rotate to fix). Quarantine and rotation-grace are
-// added in later commits in this same series.
-function checkLifecycle(record /* , res */) {
+// Returns null if the record is auth-OK (and may apply side effects on
+// `res`: the X-Cogos-Key-Deprecated header during a rotation grace
+// window). Returns {status, body} otherwise so the caller can short-
+// circuit to the right 401 with a precise error.type.
+//
+// Distinct error.type values matter for customer-side debugging —
+// `expired_api_key` is the actionable form of `invalid_api_key`
+// (rotate to fix). Quarantine is added in a later commit in this series.
+function checkLifecycle(record, res) {
   if (record && record.expires_at) {
     const exp = Date.parse(record.expires_at);
     if (Number.isFinite(exp) && Date.now() > exp) {
@@ -24,6 +26,17 @@ function checkLifecycle(record /* , res */) {
         },
       };
     }
+  }
+  // Rotation grace: auth succeeds, but the response carries a
+  // deprecation header pointing at the new key's deadline. SDKs read
+  // this to schedule a switchover. We don't expose the parent key id
+  // here — that's only on the rotate() response payload — to keep
+  // leakage surface minimal.
+  if (record && record._rotation_grace && record.rotation_grace_until) {
+    try {
+      const iso = new Date(record.rotation_grace_until).toISOString();
+      res.setHeader('X-Cogos-Key-Deprecated', `rotation_grace_until=${iso}`);
+    } catch (_e) { /* no-op */ }
   }
   return null;
 }

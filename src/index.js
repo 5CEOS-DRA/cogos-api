@@ -22,6 +22,9 @@ const anomaly = require('./anomaly');
 const { rateLimitByIp, rateLimitByTenant } = require('./rate-limit');
 const soc2 = require('./soc2');
 const notifySignup = require('./notify-signup');
+const dashboard = require('./dashboard');
+const session = require('./session');
+const dailyCap = require('./daily-cap');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -242,6 +245,226 @@ function createApp() {
     // probe could flip this to 'degraded' on partial-failure signals.
     const state = trust.buildTrustState({ healthOk: true });
     res.type('html').send(trust.trustHtml(state));
+  });
+
+  // ---- Customer-facing dashboard (public sign-in surface) ----------------
+  // The customer's API key is their password — same login model as Stripe,
+  // Vercel, Cloudflare, Fly developer dashboards. Paste the bearer key into
+  // the form, the server validates via keys.verify(), and the session
+  // cookie carries state for subsequent /dashboard/* requests.
+  //
+  // Per-IP rate limit already applies (mounted upstream). No CSRF token
+  // today — SameSite=Lax + HttpOnly cookie covers most of the state-
+  // changing-form surface; a future card can layer per-request tokens.
+  //
+  // ensureSameTenant() is the cross-tenant defense for handlers that
+  // operate on a key by id. The check is done EVERYWHERE that takes a
+  // key_id from the URL/body — defense in depth against a future hand-
+  // edit that forgets to wire the check on one route.
+  function ensureSameTenant(req, record) {
+    if (!record) return false;
+    return record.tenant_id === req.session.tenant_id;
+  }
+
+  // /dashboard — login form (or redirect if already signed in).
+  app.get('/dashboard', (req, res) => {
+    const cookies = session.parseCookieHeader(req.headers.cookie || '');
+    const existing = session.parseSession(cookies[session.COOKIE_NAME]);
+    if (existing) {
+      // Re-validate against keys store before honoring the redirect.
+      const rec = keys.findById(existing.key_id);
+      if (rec && rec.active !== false && !rec.quarantined_at) {
+        return res.redirect(303, '/dashboard/home');
+      }
+    }
+    const error = typeof req.query.error === 'string' ? req.query.error : null;
+    res.type('html').send(dashboard.loginHtml({ error }));
+  });
+
+  // /dashboard/login — POST: validate the pasted API key, mint a session.
+  app.post('/dashboard/login', (req, res) => {
+    const rawKey = req.body && req.body.api_key;
+    if (typeof rawKey !== 'string' || !rawKey.trim()) {
+      return res.status(400).type('html').send(
+        dashboard.loginHtml({ error: 'invalid_api_key' }),
+      );
+    }
+    const record = keys.verify(rawKey.trim());
+    if (!record) {
+      logger.info('dashboard_login_failed', { reason: 'invalid_or_revoked' });
+      return res.status(400).type('html').send(
+        dashboard.loginHtml({ error: 'invalid_api_key' }),
+      );
+    }
+    if (record.quarantined_at) {
+      logger.warn('dashboard_login_failed', {
+        reason: 'quarantined', key_id: record.id,
+      });
+      return res.status(400).type('html').send(
+        dashboard.loginHtml({ error: 'invalid_api_key' }),
+      );
+    }
+    const cookieValue = session.createSession({
+      tenant_id: record.tenant_id,
+      key_id: record.id,
+      app_id: record.app_id || keys.DEFAULT_APP_ID,
+    });
+    res.setHeader('Set-Cookie', session.createSetCookie(cookieValue));
+    logger.info('dashboard_login_ok', {
+      tenant_id: record.tenant_id, key_id: record.id,
+    });
+    return res.redirect(303, '/dashboard/home');
+  });
+
+  // /dashboard/logout — POST: clear cookie. No session needed (an already-
+  // invalidated cookie should still be able to "log out" cleanly).
+  app.post('/dashboard/logout', (_req, res) => {
+    res.setHeader('Set-Cookie', session.clearSetCookie());
+    return res.redirect(303, '/dashboard');
+  });
+
+  // /dashboard/forgot — placeholder for the future magic-link recovery
+  // card. Public, no auth. Returns 200 HTML (NOT 501) because surfacing
+  // it as an error obscures the explanation copy.
+  app.get('/dashboard/forgot', (_req, res) => {
+    res.type('html').send(dashboard.forgotStubHtml());
+  });
+
+  // /dashboard/home — the actual dashboard surface. Session-gated.
+  app.get('/dashboard/home', session.customerSessionAuth, (req, res) => {
+    const tenantId = req.session.tenant_id;
+    const myKeyId = req.session.key_id;
+
+    // CROSS-TENANT DEFENSE: keys.list() returns every key in the
+    // store. We FILTER HERE to req.session.tenant_id — that line is
+    // load-bearing for tenant isolation on the dashboard.
+    const tenantKeys = keys.list().filter((k) => k.tenant_id === tenantId);
+
+    // Daily-cap counter for the current key's (tenant, app) bucket.
+    // getCounter is a read-only snapshot that doesn't keep buckets alive.
+    const myApp = (req.sessionRecord && req.sessionRecord.app_id) || keys.DEFAULT_APP_ID;
+    const dailyCounter = dailyCap.getCounter(tenantId, myApp);
+
+    // Monthly quota — look up the key's package to surface the
+    // headline number. Best-effort: a key without package_id (legacy)
+    // gets the default package; if package resolution fails entirely
+    // we surface null (the UI renders ∞).
+    let monthlyQuota = null;
+    try {
+      const pkg = packages.resolveForKey
+        ? packages.resolveForKey(req.sessionRecord)
+        : null;
+      if (pkg && typeof pkg.monthly_request_quota === 'number') {
+        monthlyQuota = pkg.monthly_request_quota;
+      }
+    } catch (_e) { /* no-op — surface as null */ }
+
+    // Audit slice — last 20 rows for this tenant, cross-app. We pass
+    // tenant_id ONLY, no app_id, so the customer sees all their apps'
+    // chains interleaved. chain_ok_by_app comes from verifyByApp so
+    // each app's chain is independently checked.
+    const auditRows = usage.readSlice({
+      tenant_id: tenantId, limit: 20,
+    });
+    const chainOkByApp = (usage.verifyByApp ? usage.verifyByApp(auditRows) : {});
+    const chainBoolByApp = {};
+    for (const [app, result] of Object.entries(chainOkByApp)) {
+      chainBoolByApp[app] = result && result.ok === true;
+    }
+
+    res.type('html').send(dashboard.homeHtml({
+      tenant_id: tenantId,
+      key_id: myKeyId,
+      app_id: myApp,
+      key_prefix: (req.sessionRecord && req.sessionRecord.key_prefix) || null,
+      scheme: (req.sessionRecord && req.sessionRecord.scheme) || 'bearer',
+      expires_at: (req.sessionRecord && req.sessionRecord.expires_at) || null,
+      daily_counter: dailyCounter,
+      monthly_used: null,        // future card: month-to-date counter
+      monthly_quota: monthlyQuota,
+      keys: tenantKeys,
+      audit_rows: auditRows,
+      chain_ok_by_app: chainBoolByApp,
+    }));
+  });
+
+  // /dashboard/keys/:id/revoke — POST: revoke a key after verifying it
+  // belongs to the session's tenant. Self-revoke is rejected with the
+  // self_revoke error code (defense in depth — the UI hides the button
+  // on the current row, but a forged form post would otherwise reach
+  // here).
+  app.post('/dashboard/keys/:id/revoke', session.customerSessionAuth, (req, res) => {
+    const target = keys.findById(req.params.id);
+    if (!target) {
+      return res.redirect(303, '/dashboard/home');
+    }
+    if (!ensureSameTenant(req, target)) {
+      logger.warn('dashboard_cross_tenant_revoke_blocked', {
+        attacker_tenant: req.session.tenant_id,
+        target_tenant: target.tenant_id,
+        target_key_id: target.id,
+      });
+      return res.status(403).type('html').send(
+        dashboard.loginHtml({ error: 'cross_tenant' }),
+      );
+    }
+    if (target.id === req.session.key_id) {
+      // Self-revoke would log the customer out and break the rotation
+      // safety story (rotate IS the correct way to retire the current
+      // key). UI hides the button; this is the server-side reflection.
+      return res.redirect(303, '/dashboard/home?error=self_revoke');
+    }
+    const ok = keys.revoke(target.id);
+    if (!ok) {
+      return res.redirect(303, '/dashboard/home?error=revoke_failed');
+    }
+    logger.info('dashboard_key_revoked', {
+      tenant_id: req.session.tenant_id,
+      revoker_key_id: req.session.key_id,
+      revoked_key_id: target.id,
+    });
+    res.redirect(303, '/dashboard/home');
+  });
+
+  // /dashboard/keys/rotate — POST: rotate the session's own key. The
+  // new material is rendered ONCE; the customer's session cookie is
+  // NOT swapped (the old key stays valid through the 24h grace window,
+  // and the cookie is bound to the old key_id — that's fine because
+  // customerSessionAuth re-validates against the keys store which
+  // still finds the old record as active).
+  app.post('/dashboard/keys/rotate', session.customerSessionAuth, (req, res) => {
+    try {
+      const issued = keys.rotate(req.sessionRecord);
+      const {
+        plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id,
+        x25519_private_pem, x25519_pubkey_pem, record,
+        rotation_grace_until_iso,
+      } = issued;
+      logger.info('dashboard_key_rotated', {
+        tenant_id: req.session.tenant_id,
+        old_key_id: req.session.key_id,
+        new_key_id: record.id,
+      });
+      res.type('html').send(dashboard.rotateResultHtml({
+        new_api_key: plaintext,
+        new_hmac_secret: hmac_secret,
+        ed25519_key_id,
+        private_pem,
+        pubkey_pem,
+        x25519_private_pem,
+        x25519_pubkey_pem,
+        expires_at: record.expires_at,
+        grace_until: rotation_grace_until_iso,
+        scheme: record.scheme,
+      }));
+    } catch (e) {
+      logger.warn('dashboard_key_rotate_failed', {
+        tenant_id: req.session.tenant_id,
+        key_id: req.session.key_id,
+        error: e.message,
+      });
+      res.redirect(303, '/dashboard/home?error=rotate_failed');
+    }
   });
 
   // Public "notify-me-when-X-ships" capture. Per-IP rate-limit middleware

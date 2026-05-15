@@ -344,6 +344,7 @@ ${AT_LIMIT_FAQ_HTML}
   <footer>
     Built by 5CEOS · <a href="https://5ceos-dra.github.io">blog</a> ·
     <a href="https://github.com/5CEOS-DRA/llm-determinism-bench">benchmark</a> ·
+    <a href="/dashboard">dashboard</a> ·
     <a href="/terms">terms</a> ·
     <a href="/privacy">privacy</a> ·
     <a href="/aup">acceptable use</a> ·

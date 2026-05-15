@@ -179,6 +179,15 @@ function renderLandingHtml(packages = []) {
   </div>
 
   <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
+    <strong style="color:#3fb950">&#127873; Try free, no card.</strong>
+    100 requests/day on Tier B (3B Qwen, schema-locked, signed responses). One curl to get a key.
+    <form action="/signup/free" method="POST" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+      <input type="email" name="email" placeholder="your@email.com (optional)" autocomplete="email" style="flex:1 1 220px;min-width:200px;background:#0a0e14;color:#c9d1d9;border:1px solid #30363d;padding:8px 12px;border-radius:4px;font-family:inherit;font-size:13px">
+      <button type="submit" style="background:#238636;color:#fff;border:0;padding:9px 18px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600">Get my key</button>
+    </form>
+  </div>
+
+  <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
     <strong style="color:#3fb950">Stay informed.</strong>
     Drop your email and we&apos;ll ping you when there&apos;s news worth your attention &mdash; new tier, new substrate primitive, customer milestone, breaking benchmark result. No spam, no upsells, no third-party trackers.
     <form action="/notify-signup" method="POST" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
@@ -504,4 +513,90 @@ a:hover{text-decoration:underline}
 </main></body></html>`;
 }
 
-module.exports = { renderLandingHtml, successHtml, CANCEL_HTML, healthHtml };
+// Free-tier signup result page. Mirrors successHtml's "save now, won't
+// be shown again" UX but without any Stripe-portal link (there is no
+// subscription to manage). Includes a callout that surfaces the daily
+// caps so the customer sees what they actually bought.
+//
+// Two render modes:
+//   - issued (apiKey + hmacSecret present) → key-display page
+//   - already-has-key (apiKey null, email set) → idempotency page that
+//     points the visitor at operator help (NOT at /admin/keys directly
+//     — that surface is admin-key gated; visitors can't browse it).
+function freeSignupHtml({ apiKey, hmacSecret, expiresAt, alreadyExists, email }) {
+  if (alreadyExists) {
+    return `<!DOCTYPE html>
+<html><head>
+<title>CogOS — already on free tier</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:ui-monospace,SF Mono,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:32px 20px}
+main{max-width:680px;margin:0 auto}
+h1{color:#d29922;font-size:22px;margin:0 0 16px}
+.warn{background:#3d2611;border:1px solid #9e6a03;color:#d29922;padding:12px 14px;border-radius:6px;margin:14px 0;font-size:13px;line-height:1.6}
+a{color:#58a6ff}
+.cta{display:inline-block;background:#238636;color:#fff;padding:9px 22px;border-radius:6px;text-decoration:none;font-size:13px;margin:8px 0}
+</style></head><body><main>
+<h1>You already have a free-tier key</h1>
+<p>The email <code>${escapeHtml(email)}</code> already has a free-tier key issued against it. We don't mint a second one from this endpoint — that would turn /signup/free into a key-printing oracle for anyone who can guess an email.</p>
+<div class="warn">
+<strong>Lost your key?</strong> The plaintext is only displayed once, at issue time. We can't re-display it (we never stored it). To recover, email <a href="mailto:support@5ceos.com">support@5ceos.com</a> from the same address and an operator will issue a replacement.
+</div>
+<p style="color:#8b949e;font-size:12px;margin-top:24px">
+Or upgrade to a paid tier (with proper key rotation + dashboard) from the <a href="/">homepage</a>.
+</p>
+</main></body></html>`;
+  }
+  const safeKey = escapeHtml(apiKey);
+  const safeHmac = escapeHtml(hmacSecret);
+  return `<!DOCTYPE html>
+<html><head>
+<title>CogOS — free tier ready</title>
+<style>
+*{box-sizing:border-box}
+body{font-family:ui-monospace,SF Mono,Menlo,monospace;background:#0d1117;color:#c9d1d9;margin:0;padding:32px 20px}
+main{max-width:680px;margin:0 auto}
+h1{color:#3fb950;font-size:24px;margin:0 0 12px}
+.caps{background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#7ee2a8;padding:12px 14px;border-radius:6px;margin:14px 0;font-size:13px;line-height:1.6}
+pre{background:#161b22;border:1px solid #30363d;padding:14px;border-radius:6px;overflow-x:auto;font-size:13px}
+code{font-family:inherit}
+.cta{background:#238636;color:#fff;border:0;padding:9px 22px;border-radius:6px;cursor:pointer;font-family:inherit;font-size:13px;margin:8px 0}
+.warn{background:#3d2611;border:1px solid #9e6a03;color:#d29922;padding:12px 14px;border-radius:6px;margin:14px 0;font-size:12px}
+a{color:#58a6ff}
+h2{color:#58a6ff;font-size:16px;margin-top:28px}
+</style></head><body><main>
+<h1>✓ Free tier ready</h1>
+<p>No card, no email confirmation. Your API key and HMAC secret are below — save them now.</p>
+
+<div class="caps"><strong style="color:#3fb950">Daily caps</strong> &middot;
+Free tier: 100 requests/day, 1000 fallback tokens/day. Tier B (3B) only. Upgrade any time at <a href="/" style="color:#79c0ff">/</a>.</div>
+
+<h2>Your API key</h2>
+<pre id="apikey"><code>${safeKey}</code></pre>
+<button data-copy="${safeKey}" class="cta">Copy key</button>
+
+<h2>Your HMAC secret (for response verification)</h2>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">Use this to verify the <code>X-Cogos-Signature</code> header on every <code>/v1/*</code> response. <a href="/cookbook#verify-signature">How to verify &rarr;</a></p>
+<pre id="hmac"><code>${safeHmac}</code></pre>
+<button data-copy="${safeHmac}" class="cta">Copy HMAC secret</button>
+
+<script src="/js/copy.js" defer></script>
+
+<div class="warn">⚠ Save both now — they won't be shown again. We store only the hash of your API key and the sealed envelope of your HMAC secret. If you lose them, email <a href="mailto:support@5ceos.com">support@5ceos.com</a> for an operator-issued replacement. ${expiresAt ? `(Key expires at ${expiresAt}.)` : ''}</div>
+
+<h2>Try your first call</h2>
+<pre><code>curl https://cogos.5ceos.com/v1/chat/completions \\
+  -H "Authorization: Bearer ${safeKey}" \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "model": "cogos-tier-b",
+    "messages": [{"role":"user","content":"Hello"}]
+  }'</code></pre>
+
+<p style="color:#6e7681;font-size:11px;margin-top:24px">
+On the free tier you get Tier B (Qwen 2.5 3B, schema-locked, signed responses). For Tier A narrative work, upgrade from the <a href="/">homepage</a>.
+</p>
+</main></body></html>`;
+}
+
+module.exports = { renderLandingHtml, successHtml, CANCEL_HTML, healthHtml, freeSignupHtml };

@@ -34,6 +34,39 @@ const DEFAULT_PACKAGE = {
   is_default: true,
 };
 
+// Free-tier package — seeded alongside DEFAULT_PACKAGE on first run.
+// `public_signup: true` is the gate that POST /signup/free reads to decide
+// whether to mint a no-Stripe key for an unauthenticated visitor. Removing
+// public_signup (or flipping it to false) kills the free signup route
+// without touching code — operator policy, not code policy.
+//
+// Quota numbers (3000/mo, plus the daily_* caps the companion daily-caps
+// agent enforces) match the Free tier on the landing page. Tier-B only —
+// frontier-narrative workloads stay on paid tiers.
+const FREE_PACKAGE = {
+  id: 'free',
+  display_name: 'Free',
+  description: 'Free tier — 100 requests/day, 1000 fallback tokens/day, Tier B (3B) only. No card required.',
+  monthly_usd: 0,
+  monthly_request_quota: 3000,
+  allowed_model_tiers: ['cogos-tier-b'],
+  active: true,
+  is_default: false,
+  public_signup: true,
+  // The next four fields are owned by the companion daily-caps agent's
+  // enforcement code (src/chat-api.js + src/daily-cap.js). Persisting them
+  // here is forward-compat: the field shape is locked in the task spec,
+  // and writing them out of an authoritative seed prevents a "free package
+  // exists but daily caps unset" half-state if the companion's branch
+  // hasn't landed yet. The fields are passive data until the companion's
+  // middleware reads them.
+  daily_request_cap: 100,
+  daily_fallback_token_cap: 1000,
+  tier: 'cogos-tier-b',
+  price_cents_monthly: 0,
+  request_budget: 3000,
+};
+
 // ---------------------------------------------------------------------------
 // Storage primitives
 // ---------------------------------------------------------------------------
@@ -235,6 +268,14 @@ function validateNew(input) {
     const bad = input.allowed_model_tiers.filter((t) => !KNOWN_TIERS.includes(t));
     if (bad.length) errors.push(`unknown tier(s): ${bad.join(', ')} (valid: ${KNOWN_TIERS.join(', ')})`);
   }
+  // Additive validators — optional fields whose default-absent semantics
+  // are "feature off." Each branch is its own `if (input.X !== undefined)`
+  // so the companion daily-caps agent can add sibling clauses for
+  // daily_request_cap / daily_fallback_token_cap without touching this
+  // block. KEEP THIS PATTERN: no shared `else` chains.
+  if (input.public_signup !== undefined && typeof input.public_signup !== 'boolean') {
+    errors.push('public_signup must be a boolean if present');
+  }
   return errors;
 }
 
@@ -288,7 +329,20 @@ async function create(input) {
     updated_at: new Date().toISOString(),
     stripe_product_id: null,
     stripe_price_id: null,
+    // Additive: public_signup gates whether POST /signup/free will issue
+    // a key against this package. Default-absent = not signupable without
+    // Stripe. See src/index.js POST /signup/free.
+    public_signup: input.public_signup === true,
   };
+  // Forward-compat passthrough for fields owned by the companion daily-
+  // caps agent. We persist them when present so seed → registry round-
+  // trips don't drop the caps. We do NOT validate them here (that's the
+  // companion's surface). If the companion's branch hasn't landed, these
+  // are inert data; if it has, the middleware reads them off the record.
+  for (const field of ['daily_request_cap', 'daily_fallback_token_cap',
+                       'tier', 'price_cents_monthly', 'request_budget']) {
+    if (input[field] !== undefined) pkg[field] = input[field];
+  }
   const stripeFields = await stripeSyncCreate(pkg);
   Object.assign(pkg, stripeFields);
   if (pkg.is_default) {
@@ -321,6 +375,9 @@ async function update(id, patch) {
       ? [...patch.allowed_model_tiers]
       : old.allowed_model_tiers,
     is_default: patch.is_default !== undefined ? Boolean(patch.is_default) : old.is_default,
+    public_signup: patch.public_signup !== undefined
+      ? Boolean(patch.public_signup)
+      : (old.public_signup === true),
   };
   // Re-validate (treat patch + old as a full record)
   const errors = validateNew({ ...merged });
@@ -363,13 +420,29 @@ async function softDelete(id) {
 }
 
 // Pre-seed the default package on first startup if no packages exist.
+// Also ensures the FREE_PACKAGE exists — idempotent, so an operator who
+// later customizes the starter via /admin/packages doesn't accidentally
+// lose the free-tier signup gate. The free package is a separate
+// existence check (not gated on "registry empty") so a registry that has
+// only the starter still gets free added on next boot.
 async function seedIfEmpty() {
-  if (readAll().length > 0) return;
-  try {
-    await create({ ...DEFAULT_PACKAGE });
-    logger.info('package_default_seeded', { id: DEFAULT_PACKAGE.id });
-  } catch (e) {
-    logger.error('package_default_seed_failed', { error: e.message });
+  const existing = readAll();
+  if (existing.length === 0) {
+    try {
+      await create({ ...DEFAULT_PACKAGE });
+      logger.info('package_default_seeded', { id: DEFAULT_PACKAGE.id });
+    } catch (e) {
+      logger.error('package_default_seed_failed', { error: e.message });
+    }
+  }
+  // Idempotent free-tier seed. Read fresh after the default create above.
+  if (!get(FREE_PACKAGE.id)) {
+    try {
+      await create({ ...FREE_PACKAGE });
+      logger.info('package_free_seeded', { id: FREE_PACKAGE.id });
+    } catch (e) {
+      logger.error('package_free_seed_failed', { error: e.message });
+    }
   }
 }
 

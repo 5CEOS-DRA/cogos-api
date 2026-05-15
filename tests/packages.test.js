@@ -100,24 +100,33 @@ describe('packages: stub mode (no Stripe)', () => {
     expect(packages.list()).toEqual([]);
   });
 
-  test('seedIfEmpty() creates the default Operator Starter package', async () => {
+  test('seedIfEmpty() creates the default Operator Starter package + free tier', async () => {
     await packages.seedIfEmpty();
     const list = packages.list();
-    expect(list).toHaveLength(1);
-    expect(list[0].id).toBe('starter');
-    expect(list[0].display_name).toBe('Operator Starter');
-    expect(list[0].monthly_usd).toBe(25);
-    expect(list[0].monthly_request_quota).toBe(100000);
-    expect(list[0].allowed_model_tiers).toEqual(['cogos-tier-b']);
-    expect(list[0].is_default).toBe(true);
-    expect(list[0].stripe_product_id).toMatch(/^prod_stub_starter$/);
-    expect(list[0].stripe_price_id).toMatch(/^price_stub_starter_25$/);
+    // Seed now ships TWO packages: starter (default) + free (public_signup
+    // gate for POST /signup/free). Order is starter-first because the
+    // empty-registry seed runs before the free-package idempotent check.
+    expect(list).toHaveLength(2);
+    const starter = list.find((p) => p.id === 'starter');
+    expect(starter).toBeTruthy();
+    expect(starter.display_name).toBe('Operator Starter');
+    expect(starter.monthly_usd).toBe(25);
+    expect(starter.monthly_request_quota).toBe(100000);
+    expect(starter.allowed_model_tiers).toEqual(['cogos-tier-b']);
+    expect(starter.is_default).toBe(true);
+    expect(starter.stripe_product_id).toMatch(/^prod_stub_starter$/);
+    expect(starter.stripe_price_id).toMatch(/^price_stub_starter_25$/);
+    const free = list.find((p) => p.id === 'free');
+    expect(free).toBeTruthy();
+    expect(free.monthly_usd).toBe(0);
+    expect(free.public_signup).toBe(true);
+    expect(free.allowed_model_tiers).toEqual(['cogos-tier-b']);
   });
 
   test('seedIfEmpty() is idempotent', async () => {
     await packages.seedIfEmpty();
     await packages.seedIfEmpty();
-    expect(packages.list()).toHaveLength(1);
+    expect(packages.list()).toHaveLength(2);
   });
 
   test('create() rejects bad ids', async () => {

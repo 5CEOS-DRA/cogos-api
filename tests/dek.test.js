@@ -29,6 +29,7 @@ function freshDek() {
 
 // Save the test runner's env so we can restore between cases.
 let savedEnv;
+let savedCwd;
 let tmpDir;
 
 beforeEach(() => {
@@ -36,6 +37,11 @@ beforeEach(() => {
     COGOS_DEK_HEX: process.env.COGOS_DEK_HEX,
     COGOS_DEK_FILE: process.env.COGOS_DEK_FILE,
   };
+  // Capture pre-test cwd so afterEach can restore it. Without this, a
+  // subsequent suite that imports a module which calls process.cwd() at
+  // load time (jest/expect → stack-utils) ENOENTs because tmpDir was
+  // just rm'd. Flake-fix; doesn't change any assertions.
+  savedCwd = process.cwd();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-dek-'));
   // Run inside the tmp dir so the default generated-on-disk path
   // (data/.dek) doesn't pollute the repo root.
@@ -47,6 +53,9 @@ afterEach(() => {
     if (savedEnv[k] === undefined) delete process.env[k];
     else process.env[k] = savedEnv[k];
   }
+  // Restore cwd BEFORE rm'ing tmpDir so the rm doesn't pull the rug out
+  // from under any subsequent process.cwd() call.
+  try { process.chdir(savedCwd); } catch (_e) { /* no-op */ }
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_e) {}
 });
 

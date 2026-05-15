@@ -309,6 +309,7 @@ function trustHtml(state) {
   const s = state || {};
   const body = `
 <h1>Trust &amp; transparency</h1>
+<div style="color:#8b949e;font-size:13px;margin:-2px 0 12px;font-style:italic">CogOS is the substrate behind 5CEOs. This page is what we publish to prove every claim.</div>
 <div class="meta">Modeled after trust.salesforce.com. Every claim on this page maps to data the page can prove from the running process or to a section of <code>SECURITY.md</code>. If we don&apos;t have data, we say so &mdash; we don&apos;t fabricate uptime percentages or past advisories.</div>
 
 ${renderStatusBanner(s)}

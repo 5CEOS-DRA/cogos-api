@@ -126,7 +126,7 @@ function renderLandingHtml(packages = []) {
   return `<!DOCTYPE html>
 <html>
 <head>
-  <title>CogOS — the cognition substrate for production AI</title>
+  <title>CogOS — the substrate behind 5CEOs · available standalone</title>
   <meta name="viewport" content="width=device-width,initial-scale=1">
   <style>
     *{box-sizing:border-box}
@@ -156,6 +156,7 @@ function renderLandingHtml(packages = []) {
 <body>
 <main>
   <h1>CogOS</h1>
+  <div style="color:#8b949e;font-size:13px;margin:-2px 0 18px;font-style:italic">The substrate behind 5CEOs. Available standalone.</div>
   <div class="tag"><strong>Reproducible LLM calls. No retry loops. No model drift.</strong> Schema-locked decoding means the model physically can't emit malformed JSON. Same call → same bytes out. Same call next month → same bytes out. Same call under load → no rate limit, no throttle. <strong style="color:#3fb950">78% less inference spend, 72% less carbon</strong> on a typical production mix — because most of your calls don't need a frontier model. Stop debugging the LLM. Ship the feature.</div>
 
   <div class="live-note">

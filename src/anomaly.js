@@ -51,6 +51,7 @@ const path = require('path');
 
 const logger = require('./logger');
 const honeypot = require('./honeypot');
+const keys = require('./keys');
 
 // ---------------------------------------------------------------------------
 // Configuration.
@@ -92,6 +93,20 @@ const BAN_MS_SCANNER = 15 * 60_000;
 // Cap on ban entries to bound memory under a key-rotation attack.
 const MAX_BANS = 10_000;
 const bans = new Map(); // ip -> blockedUntilMs
+
+// Recent successful customer-auth tracker — IP → { keyId, atMs }.
+// Populated by observe() whenever res.on('finish') sees req.apiKey set
+// (i.e., bearerAuth or ed25519Auth attached a record to the request).
+// Used by the quarantine trigger (2026-05-15 — key lifecycle card,
+// commit 3/3): if scanner_active fires for an IP that has a recent
+// (≤60s) valid customer auth, we quarantine that key. The combo is the
+// only auto-trigger we trust — `auth_brute_force_suspected` alone fires
+// on misconfigured SDKs and customer onboarding mistakes, not just
+// attackers; the scanner+valid-key combo is unambiguous (real customers
+// don't hit honeypot paths).
+const RECENT_AUTH_WINDOW_MS = 60_000;
+const MAX_RECENT_AUTHS = 50_000;
+const recentAuth = new Map(); // ip -> { keyId, atMs }
 
 const THRESHOLDS = Object.freeze({
   // Per-IP — 10/min translates to one auth-failure every 6s. Real customers
@@ -273,8 +288,64 @@ function fire(bucket, kind, severity, now, contextExtra) {
     if (banMs > 0) {
       setBan(bucket.value, now + banMs);
     }
+    // Quarantine trigger: scanner_active + recent valid customer auth
+    // from the SAME IP within 60s is the only unambiguous auto-trigger
+    // (see RECENT_AUTH_WINDOW_MS comment). We deliberately do NOT
+    // quarantine on auth_brute_force_suspected — that fires on
+    // misconfigured SDKs too often. Quarantine is fail-closed-style;
+    // gated to fail-closed mode for the same reason bans are.
+    if (kind === 'scanner_active') {
+      const keyId = peekRecentAuth(bucket.value, now);
+      if (keyId) {
+        try {
+          const did = keys.quarantine(keyId, 'scanner_active+valid_auth');
+          if (did) {
+            logger.warn('anomaly_quarantine_set', {
+              key_id: keyId,
+              ip: bucket.value,
+              reason: 'scanner_active+valid_auth',
+            });
+          }
+        } catch (e) {
+          // Quarantine MUST NEVER block the request path. If the store
+          // is unhappy we log and move on; the ban above still applies.
+          logger.warn('anomaly_quarantine_failed', { key_id: keyId, error: e.message });
+        }
+      }
+    }
   }
   return true;
+}
+
+// ---------------------------------------------------------------------------
+// Recent-auth tracker. Read/write side for the quarantine trigger.
+// ---------------------------------------------------------------------------
+function recordRecentAuth(ip, keyId, now) {
+  if (!ip || !keyId) return;
+  // LRU re-insert keeps the most recent at the end; eviction drops the
+  // oldest entry when the cap is hit. Memory bound is the same shape as
+  // the bans Map — keep them parallel.
+  recentAuth.delete(ip);
+  while (recentAuth.size >= MAX_RECENT_AUTHS) {
+    const oldest = recentAuth.keys().next().value;
+    if (oldest === undefined) break;
+    recentAuth.delete(oldest);
+  }
+  recentAuth.set(ip, { keyId, atMs: now });
+}
+
+// Returns the keyId of the most recent successful auth from `ip` within
+// RECENT_AUTH_WINDOW_MS, or null. Stale entries are evicted on read so
+// we don't accumulate cruft from IPs that auth once and never again.
+function peekRecentAuth(ip, now) {
+  if (!ip) return null;
+  const entry = recentAuth.get(ip);
+  if (!entry) return null;
+  if (now - entry.atMs > RECENT_AUTH_WINDOW_MS) {
+    recentAuth.delete(ip);
+    return null;
+  }
+  return entry.keyId;
 }
 
 // ---------------------------------------------------------------------------
@@ -428,6 +499,16 @@ function observe(req, res, startMs) {
   const lastPath = req.path;
   const status = res.statusCode;
 
+  // Recent-auth tracker for the quarantine trigger. req.apiKey is set
+  // by bearerAuth/ed25519Auth only on successful verification — so any
+  // time we see it here, auth succeeded for THIS request on THIS IP.
+  // We record regardless of downstream status (a 500 from the upstream
+  // doesn't mean the auth was bad). Window is 60s; see
+  // RECENT_AUTH_WINDOW_MS comment above.
+  if (req.apiKey && req.apiKey.id) {
+    recordRecentAuth(String(ip), req.apiKey.id, now);
+  }
+
   // a) auth_4xx per-IP
   if (status === 401 || status === 403) {
     const b = getOrCreateBucket('ip', String(ip), now);
@@ -482,12 +563,17 @@ const _test = {
   reset() {
     buckets.clear();
     bans.clear();
+    recentAuth.clear();
     latency.currentMs = null;
     latency.currentSamples = [];
     latency.history = [];
     latency.lastFiredAtMinuteMs = 0;
     lastSweepMs = 0;
   },
+  recordRecentAuth(ip, keyId, now) { recordRecentAuth(ip, keyId, now || Date.now()); },
+  peekRecentAuth(ip) { return peekRecentAuth(ip, Date.now()); },
+  recentAuthCount() { return recentAuth.size; },
+  RECENT_AUTH_WINDOW_MS,
   forceBan(ip, ms) {
     setBan(ip, Date.now() + ms);
   },

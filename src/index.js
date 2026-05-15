@@ -471,6 +471,77 @@ function createApp() {
     });
   });
 
+  // ---- Customer-driven rotation (Security Hardening Card: key lifecycle) ----
+  //
+  // POST /v1/keys/rotate — customerAuth-gated (works with both bearer +
+  // ed25519). The caller MUST succeed authentication with their CURRENT
+  // key. We issue a new key of the same scheme (bearer → bearer
+  // plaintext; ed25519 → fresh ed25519 + x25519 keypair) inheriting
+  // tenant_id / app_id / tier / package_id and CRUCIALLY the parent's
+  // expires_at (rotation != renewal). The old record gets a 24h
+  // rotation_grace_until stamp; during the grace window both keys
+  // authenticate and the old key's responses carry X-Cogos-Key-Deprecated.
+  // After grace, verify() auto-revokes the old record on next touch.
+  //
+  // KNOWN GAP (TODO future card): an attacker who already has the old
+  // key can rotate it themselves — this protects against future leaks
+  // but not the leak that's already happened. A human-in-the-loop
+  // confirmation flow (email-the-original-customer-before-rotating)
+  // closes that hole and is a separate card.
+  //
+  // Response shape mirrors POST /admin/keys so customer SDKs / the
+  // cookbook recipe can share display logic.
+  app.post('/v1/keys/rotate', customerAuth, tenantLimiter, (req, res) => {
+    try {
+      const issued = keys.rotate(req.apiKey);
+      const {
+        plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id,
+        x25519_private_pem, x25519_pubkey_pem, record,
+        rotation_grace_until_iso, rotated_from_key_id,
+      } = issued;
+      logger.info('key_rotated', {
+        old_id: rotated_from_key_id,
+        new_id: record.id,
+        tenant_id: record.tenant_id,
+        app_id: record.app_id,
+        scheme: record.scheme,
+      });
+      const response = {
+        key_id: record.id,
+        tenant_id: record.tenant_id,
+        app_id: record.app_id,
+        tier: record.tier,
+        scheme: record.scheme,
+        issued_at: record.issued_at,
+        expires_at: record.expires_at,
+        rotated_from_key_id,
+        rotation_grace_until: rotation_grace_until_iso,
+        hmac_secret,
+        warning: `Old key remains valid until ${rotation_grace_until_iso}; `
+          + 'switch your client to the new key before then. Save the new '
+          + 'material now — it will not be shown again.',
+      };
+      if (record.scheme === 'bearer') {
+        response.api_key = plaintext;
+      } else {
+        response.ed25519_key_id = ed25519_key_id;
+        response.private_pem = private_pem;
+        response.pubkey_pem = pubkey_pem;
+        response.x25519_private_pem = x25519_private_pem;
+        response.x25519_pubkey_pem = x25519_pubkey_pem;
+      }
+      res.status(201).json(response);
+    } catch (e) {
+      logger.warn('key_rotate_failed', {
+        caller_id: req.apiKey && req.apiKey.id,
+        error: e.message,
+      });
+      res.status(400).json({
+        error: { message: e.message, type: 'rotation_failed' },
+      });
+    }
+  });
+
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
   // TODO(week-1-finisher): the /admin/* routes below are slated for removal
   // once the offline admin ceremony lands. See scripts/admin-ceremony/README.md
@@ -486,7 +557,9 @@ function createApp() {
   //     persist only the public PEM + a stable keyId. No reusable customer
   //     auth material at rest on our side. Customer signs every request.
   app.post('/admin/keys', adminAuth, (req, res) => {
-    const { tenant_id, app_id, label, tier, scheme } = req.body || {};
+    const {
+      tenant_id, app_id, label, tier, scheme, expires_at_iso,
+    } = req.body || {};
     if (!tenant_id) {
       return res.status(400).json({ error: { message: 'tenant_id required' } });
     }
@@ -502,12 +575,17 @@ function createApp() {
       // anomaly bucket. Null/undefined → keys.issue() defaults to
       // '_default' (validated in src/keys.js — slug shape, max 64).
       // Shape errors surface as 400.
+      //
+      // expires_at_iso (optional, lifecycle card): caller can override
+      // the default 1-year expiration window. Past timestamps allowed
+      // for operator testing — the auth path treats them as expired.
       issued = keys.issue({
         tenantId: tenant_id,
         app_id,
         label,
         tier,
         scheme: requestedScheme,
+        expires_at_iso: expires_at_iso || null,
       });
     } catch (e) {
       return res.status(400).json({ error: { message: e.message } });
@@ -525,6 +603,10 @@ function createApp() {
     // of bearer vs ed25519 auth) gets HMAC-signed /v1 responses they should
     // be able to verify. Without it on this response, operator-issued keys
     // have no way to verify the X-Cogos-Signature header.
+    //
+    // expires_at is surfaced so the customer + their SDK know when to
+    // rotate. The default is 1 year from now; operator can override via
+    // expires_at_iso on the request.
     const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
@@ -532,6 +614,7 @@ function createApp() {
       tier: record.tier,
       scheme: requestedScheme,
       issued_at: record.issued_at,
+      expires_at: record.expires_at,
       hmac_secret, // shown ONCE; used to verify X-Cogos-Signature on /v1/*
       warning: 'Save this key + hmac_secret now. They will not be shown again.',
     };
@@ -566,6 +649,37 @@ function createApp() {
     if (!ok) return res.status(404).json({ error: { message: 'Key not found' } });
     logger.info('key_revoked', { id: req.params.id });
     res.json({ revoked: true, key_id: req.params.id });
+  });
+
+  // ---- Admin: quarantine surfaces (lifecycle card commit 3/3) ----
+  //
+  // List every key currently held in quarantine. Returned shape mirrors
+  // /admin/keys listing so the operator dashboard can reuse the same
+  // table component. Includes quarantine_reason for triage.
+  app.get('/admin/keys/quarantined', adminAuth, (_req, res) => {
+    res.json({ keys: keys.listQuarantined() });
+  });
+
+  // Clear quarantine. The operator decides the key is safe to return to
+  // production. clearQuarantine() appends to quarantine_history so the
+  // audit trail survives. 404 if no matching key; 409 if not currently
+  // quarantined (caller would otherwise believe they cleared something
+  // they didn't).
+  app.post('/admin/keys/:id/clear-quarantine', adminAuth, (req, res) => {
+    const id = req.params.id;
+    const found = keys.findById(id);
+    if (!found) return res.status(404).json({ error: { message: 'Key not found' } });
+    if (!found.quarantined_at) {
+      return res.status(409).json({
+        error: { message: 'Key is not currently quarantined' },
+      });
+    }
+    const ok = keys.clearQuarantine(id);
+    if (!ok) {
+      return res.status(500).json({ error: { message: 'clearQuarantine failed unexpectedly' } });
+    }
+    logger.info('key_quarantine_cleared', { id });
+    res.json({ cleared: true, key_id: id });
   });
 
   // Usage log — supports `?since=<unix-ms>` for tailing.

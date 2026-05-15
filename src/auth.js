@@ -3,6 +3,60 @@
 const crypto = require('node:crypto');
 const { verify, findByEd25519KeyId, touchLastUsed, PREFIX } = require('./keys');
 
+// Lifecycle gate shared by both bearer + ed25519 auth paths.
+// Returns null if the record is auth-OK (and may apply side effects on
+// `res`: the X-Cogos-Key-Deprecated header during a rotation grace
+// window). Returns {status, body} otherwise so the caller can short-
+// circuit to the right 401 with a precise error.type.
+//
+// Distinct error.type values matter for customer-side debugging —
+// `expired_api_key` is the actionable form of `invalid_api_key`
+// (rotate to fix). Quarantine is added in a later commit in this series.
+function checkLifecycle(record, res) {
+  if (record && record.expires_at) {
+    const exp = Date.parse(record.expires_at);
+    if (Number.isFinite(exp) && Date.now() > exp) {
+      return {
+        status: 401,
+        body: {
+          error: {
+            message: 'API key has expired. Rotate via POST /v1/keys/rotate.',
+            type: 'expired_api_key',
+          },
+        },
+      };
+    }
+  }
+  // Quarantined? Operator-resumable; the customer can't unfreeze
+  // themselves on this path. Distinct type so the SDK can surface a
+  // specific message instead of a generic "your key is dead." Checked
+  // before the rotation-grace branch so a quarantined key in grace
+  // still fails closed.
+  if (record && record.quarantined_at) {
+    return {
+      status: 401,
+      body: {
+        error: {
+          message: 'API key is quarantined for review. Contact support@5ceos.com.',
+          type: 'key_quarantined_for_review',
+        },
+      },
+    };
+  }
+  // Rotation grace: auth succeeds, but the response carries a
+  // deprecation header pointing at the new key's deadline. SDKs read
+  // this to schedule a switchover. We don't expose the parent key id
+  // here — that's only on the rotate() response payload — to keep
+  // leakage surface minimal.
+  if (record && record._rotation_grace && record.rotation_grace_until) {
+    try {
+      const iso = new Date(record.rotation_grace_until).toISOString();
+      res.setHeader('X-Cogos-Key-Deprecated', `rotation_grace_until=${iso}`);
+    } catch (_e) { /* no-op */ }
+  }
+  return null;
+}
+
 // Bearer auth for customer API calls. On success, attaches req.apiKey =
 // the key record (without hash).
 function bearerAuth(req, res, next) {
@@ -24,6 +78,8 @@ function bearerAuth(req, res, next) {
       error: { message: 'Invalid or revoked API key', type: 'invalid_api_key' },
     });
   }
+  const gate = checkLifecycle(record, res);
+  if (gate) return res.status(gate.status).json(gate.body);
   req.apiKey = record;
   next();
 }
@@ -170,6 +226,12 @@ function ed25519Auth(req, res, next) {
       error: { message: 'Signature verification failed', type: 'invalid_api_key' },
     });
   }
+
+  // Lifecycle gate — currently checks expiration only. Runs AFTER
+  // signature verification so a malformed signature doesn't reveal
+  // lifecycle state to unauthenticated probes.
+  const gate = checkLifecycle(record, res);
+  if (gate) return res.status(gate.status).json(gate.body);
 
   // Strip pubkey_pem from req.apiKey to keep the downstream shape tight —
   // it's persisted state, not request state. tenant_id / tier / package_id

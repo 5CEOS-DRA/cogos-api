@@ -407,4 +407,56 @@ describe('anomaly detector — fail-closed mode (ANOMALY_FAIL_CLOSED=1)', () => 
     anom._test.forceBan('10.0.0.1', -1);
     expect(anom.isBlocked('10.0.0.1')).toBe(0);
   });
+
+  test('scanner_active + recent valid auth → key is quarantined', async () => {
+    // Key lifecycle card commit 3/3: the combo of a scanner-active fire
+    // AND a recent (≤60s) successful customer auth from the same IP is
+    // the only auto-quarantine trigger. fail-closed mode only.
+    const { app, anom } = freshPair();
+    const keys = require('../src/keys');
+    anom._test.reset();
+    const issue = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-quarantine-fc' });
+    expect(issue.status).toBe(201);
+    // Pre-seed the recent-auth tracker on both the IPv4 + IPv4-mapped-IPv6
+    // forms supertest may resolve to.
+    anom._test.recordRecentAuth('127.0.0.1', issue.body.key_id);
+    anom._test.recordRecentAuth('::ffff:127.0.0.1', issue.body.key_id);
+    // 4 honeypot hits → fires scanner_active.
+    await request(app).get('/.env');
+    await request(app).get('/wp-admin');
+    await request(app).get('/.git/config');
+    await request(app).get('/xmlrpc.php');
+    const rec = keys.findById(issue.body.key_id);
+    expect(rec.quarantined_at).toEqual(expect.any(Number));
+    expect(rec.quarantine_reason).toBe('scanner_active+valid_auth');
+  });
+});
+
+describe('anomaly detector — quarantine NOT triggered in shadow mode', () => {
+  // Pair test: in shadow mode the same scanner+auth combo must NOT
+  // quarantine the key. Quarantine is fail-closed-style; we don't
+  // auto-disable customer keys in observe-only mode.
+  beforeEach(() => {
+    delete process.env.ANOMALY_FAIL_CLOSED;
+  });
+  test('scanner_active + recent auth in SHADOW mode does NOT quarantine', async () => {
+    const { app, anom } = freshPair();
+    const keys = require('../src/keys');
+    anom._test.reset();
+    const issue = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'tenant-quarantine-shadow' });
+    anom._test.recordRecentAuth('127.0.0.1', issue.body.key_id);
+    anom._test.recordRecentAuth('::ffff:127.0.0.1', issue.body.key_id);
+    await request(app).get('/.env');
+    await request(app).get('/wp-admin');
+    await request(app).get('/.git/config');
+    await request(app).get('/xmlrpc.php');
+    const rec = keys.findById(issue.body.key_id);
+    expect(rec.quarantined_at).toBeFalsy();
+  });
 });

@@ -167,6 +167,11 @@ function newEd25519KeyId() {
 // Bearer-scheme keys are NOT issued an x25519 keypair. A bearer
 // customer's audit rows stay cleartext (sealed:false), which matches
 // the doctrine that sealing is opt-in via the ed25519 scheme.
+// Default key expiration: 1 year from issuance. Long-lived secrets get
+// stolen; an explicit ceiling forces a rotation/renewal cadence. Tunable
+// per-tier in the future; for v1 every tier gets the same window.
+const DEFAULT_KEY_LIFETIME_MS = 365 * 24 * 60 * 60_000;
+
 function issue({
   tenantId,
   app_id = null,
@@ -175,10 +180,29 @@ function issue({
   package_id = null,
   stripe = null,
   scheme = 'bearer',
+  expires_at_iso = null,
 } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
     throw new Error(`unknown scheme: ${scheme}`);
+  }
+  // Resolve expires_at. Caller-provided ISO wins; otherwise default to
+  // now + DEFAULT_KEY_LIFETIME_MS. We accept and re-serialize so a malformed
+  // string fails LOUDLY at issue time, not later at verify time. A past
+  // ISO is allowed (operator may issue an already-expired key for testing
+  // / negative scenarios); auth path treats it as expired.
+  let resolvedExpiresAt = null;
+  if (expires_at_iso != null && expires_at_iso !== '') {
+    if (typeof expires_at_iso !== 'string') {
+      throw new Error('expires_at_iso must be a string');
+    }
+    const parsed = Date.parse(expires_at_iso);
+    if (!Number.isFinite(parsed)) {
+      throw new Error('expires_at_iso must be a parseable ISO-8601 timestamp');
+    }
+    resolvedExpiresAt = new Date(parsed).toISOString();
+  } else {
+    resolvedExpiresAt = new Date(Date.now() + DEFAULT_KEY_LIFETIME_MS).toISOString();
   }
   // Validate-and-normalize. Null/undefined/empty all collapse to
   // DEFAULT_APP_ID so callers who never pass app_id still get a sane tag.
@@ -245,6 +269,21 @@ function issue({
     stripe_subscription_id: (stripe && stripe.subscription_id) || null,
     stripe_subscription_status: (stripe && stripe.status) || null,
     customer_email: (stripe && stripe.email) || null,
+    // Lifecycle: expires_at is set at issue time and never extended.
+    // Auth path rejects with `expired_api_key` past this point.
+    expires_at: resolvedExpiresAt,
+    // rotation_grace_until — ms-epoch on the OLD record at rotation
+    // time. During the grace window the old key still authenticates and
+    // the response carries X-Cogos-Key-Deprecated. After grace,
+    // verify() auto-revokes on next touch.
+    rotation_grace_until: null,
+    // quarantined_at — ms-epoch; non-null = key is held for review.
+    // Auth path rejects with `key_quarantined_for_review`. Cleared by
+    // operator via /admin/keys/:id/clear-quarantine. Trigger is
+    // anomaly-driven (scanner_active + recent valid auth from same IP
+    // within 60s, fail-closed mode only).
+    quarantined_at: null,
+    quarantine_reason: null,
   };
   const records = readAll();
   records.push(record);
@@ -270,11 +309,24 @@ function issue({
 // header. Returns the full record (sans key_hash) or null. Active flag
 // is NOT filtered here so the middleware can distinguish "doesn't exist"
 // from "revoked" and return a clearer 401 reason.
+//
+// Rotation grace: if the record's rotation_grace_until has elapsed,
+// auto-revoke in place (mirrors verify() for the bearer path). If the
+// grace window is still open, surface `_rotation_grace=true` on the
+// returned record so the auth middleware can emit X-Cogos-Key-Deprecated.
 function findByEd25519KeyId(keyId) {
   if (typeof keyId !== 'string' || !keyId) return null;
   const records = readAll();
   const found = records.find((r) => r.ed25519_key_id === keyId);
   if (!found) return null;
+  const nowMs = Date.now();
+  if (found.active && found.rotation_grace_until
+      && nowMs > found.rotation_grace_until) {
+    found.active = false;
+    found.revoked_at = new Date().toISOString();
+    found.revoke_reason = 'rotation_grace_expired';
+    try { writeAll(records); } catch (_e) { /* no-op */ }
+  }
   // app_id read-time backfill: pre-multi-app records have no app_id.
   // Treat absent as DEFAULT_APP_ID so downstream auth + audit logic
   // never has to special-case null. We do NOT rewrite the file — the
@@ -289,6 +341,10 @@ function findByEd25519KeyId(keyId) {
   const hmacCleartext = _decryptHmacSecret(found);
   if (hmacCleartext) out.hmac_secret = hmacCleartext;
   if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  if (found.active && found.rotation_grace_until
+      && nowMs <= found.rotation_grace_until) {
+    out._rotation_grace = true;
+  }
   return out;
 }
 
@@ -341,12 +397,33 @@ function updateStripeStatus(keyId, { status, active }) {
 }
 
 // Verify a presented bearer string. Returns the record if valid+active.
+//
+// Rotation grace (2026-05-15):
+//   - If `rotation_grace_until` has elapsed, auto-revoke the record in
+//     place and return null so downstream sees a clean revoke (no
+//     zombie key linger).
+//   - If `rotation_grace_until > now`, the OLD key is in active grace:
+//     mark `_rotation_grace=true` on the returned record so auth.js can
+//     append the X-Cogos-Key-Deprecated response header. The new key
+//     was issued by rotate() with no grace flag.
 function verify(plaintext) {
   if (typeof plaintext !== 'string' || !plaintext.startsWith(PREFIX)) return null;
   const records = readAll();
   const hash = hashKey(plaintext);
   const found = records.find((r) => r.key_hash === hash && r.active);
   if (!found) return null;
+  // Auto-revoke if rotation grace window has expired. After rotation,
+  // the old record stays auth-able for 24h via rotation_grace_until; once
+  // past, the verify path retires it. Belt-and-suspenders against the
+  // edge case where the customer never actually rotated to the new key.
+  const nowMs = Date.now();
+  if (found.rotation_grace_until && nowMs > found.rotation_grace_until) {
+    found.active = false;
+    found.revoked_at = new Date().toISOString();
+    found.revoke_reason = 'rotation_grace_expired';
+    try { writeAll(records); } catch (_e) { /* no-op */ }
+    return null;
+  }
   // Resolve the cleartext HMAC secret. Order:
   //   1. found.hmac_secret_sealed → open under DEK (the new shape).
   //   2. found.hmac_secret (legacy cleartext) → use as-is.
@@ -364,9 +441,7 @@ function verify(plaintext) {
   // Best-effort last_used_at touch + lazy migration to the sealed shape.
   // Any record that gets touched on the verify path is rewritten with
   // hmac_secret_sealed and cleartext hmac_secret stripped — the disk
-  // moves toward fully-sealed-at-rest one verify at a time. Records
-  // that never verify stay in whatever shape they were issued in
-  // (operator can force a touch by listing + writing if desired).
+  // moves toward fully-sealed-at-rest one verify at a time.
   try {
     found.last_used_at = new Date().toISOString();
     if (!found.hmac_secret_sealed || didMigrate) {
@@ -384,6 +459,9 @@ function verify(plaintext) {
   // concrete app_id to usage.record() without a null-coalesce on every
   // hot-path request.
   if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  if (found.rotation_grace_until && nowMs <= found.rotation_grace_until) {
+    out._rotation_grace = true;
+  }
   return out;
 }
 
@@ -428,11 +506,197 @@ function revoke(id) {
   return true;
 }
 
+// ---------------------------------------------------------------------------
+// Rotation (2026-05-15 — key lifecycle card, commit 2/3).
+// ---------------------------------------------------------------------------
+//
+// 24h grace window — long enough that a customer running rotation from a
+// CI pipeline can roll their app's deploys at their own cadence; short
+// enough that a leaked credential isn't valid for weeks. 24h is the
+// smallest window that comfortably accommodates a once-a-day deploy.
+const ROTATION_GRACE_MS = 24 * 60 * 60_000;
+
+// Rotate a key. The OLD record is stamped with rotation_grace_until =
+// now + 24h and stays active during the grace window — verify() returns
+// it with `_rotation_grace=true` so auth.js can append a deprecation
+// header. After the grace window, verify() auto-revokes on next touch.
+//
+// The NEW record inherits tenant_id, app_id, tier, package_id, and
+// CRUCIALLY the OLD record's expires_at — a rotation is not a renewal.
+// Operator-policy decision: rotation is for "this key may be leaked,"
+// not "I want another year." Renewal is a separate (future) flow.
+//
+// `callerRecord` is the verified record from the auth middleware. We
+// re-read it from disk here to get the canonical state.
+//
+// Returns the same shape as issue() so the route handler can reuse the
+// display logic. Throws if the record doesn't exist or has been revoked
+// between auth and rotate (rare; clear error beats a silent partial).
+function rotate(callerRecord) {
+  if (!callerRecord || !callerRecord.id) {
+    throw new Error('rotate requires the authenticated caller record');
+  }
+  const records = readAll();
+  const old = records.find((r) => r.id === callerRecord.id);
+  if (!old) throw new Error('caller record not found in store');
+  if (!old.active) throw new Error('cannot rotate a revoked key');
+
+  // Issue the new record. We DO NOT call issue() directly because issue()
+  // would mint a fresh expires_at; rotation carries the parent's window
+  // forward. We replicate the issue() shape inline so the new record is
+  // identical in every other field.
+  const hmac_secret = newHmacSecret();
+  let plaintext = null;
+  let private_pem = null;
+  let pubkey_pem = null;
+  let ed25519_key_id = null;
+  let key_hash = null;
+  let key_prefix = null;
+  let x25519_private_pem = null;
+  let x25519_pubkey_pem = null;
+
+  if (old.scheme === 'bearer') {
+    plaintext = newKeyPlaintext();
+    key_hash = hashKey(plaintext);
+    key_prefix = plaintext.slice(0, 16);
+  } else if (old.scheme === 'ed25519') {
+    const kp = crypto.generateKeyPairSync('ed25519');
+    pubkey_pem = kp.publicKey.export({ type: 'spki', format: 'pem' });
+    private_pem = kp.privateKey.export({ type: 'pkcs8', format: 'pem' });
+    ed25519_key_id = newEd25519KeyId();
+    const x = crypto.generateKeyPairSync('x25519');
+    x25519_pubkey_pem = x.publicKey.export({ type: 'spki', format: 'pem' });
+    x25519_private_pem = x.privateKey.export({ type: 'pkcs8', format: 'pem' });
+  } else {
+    throw new Error(`cannot rotate unknown scheme: ${old.scheme}`);
+  }
+
+  const newRecord = {
+    id: crypto.randomUUID(),
+    scheme: old.scheme,
+    key_hash,
+    key_prefix,
+    ed25519_key_id,
+    pubkey_pem,
+    x25519_pubkey_pem,
+    hmac_secret,
+    tenant_id: old.tenant_id,
+    app_id: old.app_id || DEFAULT_APP_ID,
+    label: old.label || '',
+    tier: old.tier,
+    package_id: old.package_id || null,
+    active: true,
+    issued_at: new Date().toISOString(),
+    last_used_at: null,
+    stripe_customer_id: old.stripe_customer_id || null,
+    stripe_subscription_id: old.stripe_subscription_id || null,
+    stripe_subscription_status: old.stripe_subscription_status || null,
+    customer_email: old.customer_email || null,
+    // expires_at carries forward — rotation is not renewal.
+    expires_at: old.expires_at || null,
+    rotation_grace_until: null,
+    // Provenance — links new key back to its parent for the audit story.
+    rotated_from_key_id: old.id,
+  };
+
+  // Stamp the OLD record's grace window. It stays active=true; verify()
+  // auto-revokes on first touch past the deadline.
+  old.rotation_grace_until = Date.now() + ROTATION_GRACE_MS;
+  old.rotated_to_key_id = newRecord.id;
+
+  records.push(newRecord);
+  writeAll(records);
+
+  return {
+    plaintext,
+    private_pem,
+    pubkey_pem,
+    ed25519_key_id,
+    x25519_private_pem,
+    x25519_pubkey_pem,
+    hmac_secret,
+    record: { ...newRecord, key_hash: undefined, hmac_secret: undefined },
+    rotation_grace_until_iso: new Date(old.rotation_grace_until).toISOString(),
+    rotated_from_key_id: old.id,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Quarantine (2026-05-15 — key lifecycle card, commit 3/3).
+// ---------------------------------------------------------------------------
+//
+// Quarantine a key. Idempotent — calling on an already-quarantined key
+// is a no-op (preserves the original quarantine timestamp + reason).
+// Quarantine is fail-closed: auth.js returns 401
+// `key_quarantined_for_review` until the operator clears it explicitly.
+function quarantine(id, reason) {
+  if (!id) return false;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return false;
+  if (r.quarantined_at) return true; // already quarantined; no rewrite
+  r.quarantined_at = Date.now();
+  r.quarantine_reason = String(reason || 'unspecified');
+  writeAll(records);
+  return true;
+}
+
+// Operator-driven clear. Reverse of quarantine(). Preserves the original
+// quarantine timestamp+reason as quarantine_history so a key bouncing
+// in/out of quarantine leaves a trail (that itself is a signal).
+function clearQuarantine(id) {
+  if (!id) return false;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return false;
+  if (!r.quarantined_at) return false; // nothing to clear
+  if (!Array.isArray(r.quarantine_history)) r.quarantine_history = [];
+  r.quarantine_history.push({
+    quarantined_at: r.quarantined_at,
+    quarantine_reason: r.quarantine_reason || null,
+    cleared_at: Date.now(),
+  });
+  r.quarantined_at = null;
+  r.quarantine_reason = null;
+  writeAll(records);
+  return true;
+}
+
+// Return every record currently quarantined. Operator visibility surface
+// for /admin/keys/quarantined.
+function listQuarantined() {
+  return readAll()
+    .filter((r) => r.quarantined_at)
+    .map((r) => {
+      const out = { ...r, key_hash: undefined };
+      if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+      return out;
+    });
+}
+
+// Internal lookup used by the admin clear-quarantine route to disambig-
+// uate 404 (no such key) from 409 (key exists but isn't quarantined).
+// Returns the record sans key_hash, or null.
+function findById(id) {
+  if (!id) return null;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return null;
+  const out = { ...r, key_hash: undefined };
+  if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  return out;
+}
+
 module.exports = {
   issue,
   verify,
   list,
   revoke,
+  rotate,
+  quarantine,
+  clearQuarantine,
+  listQuarantined,
+  findById,
   findByStripeCustomer,
   updateStripeStatus,
   findByEd25519KeyId,
@@ -440,4 +704,6 @@ module.exports = {
   normalizeAppId,
   PREFIX,
   DEFAULT_APP_ID,
+  DEFAULT_KEY_LIFETIME_MS,
+  ROTATION_GRACE_MS,
 };

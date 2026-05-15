@@ -47,10 +47,14 @@ fi
 # Auto-fetch COSIGN_PASSWORD from Key Vault if unset locally. Lets a
 # single bash deploy-update.sh sign automatically without exporting the
 # password into the shell on every machine.
-if [ -z "${COSIGN_PASSWORD:-}" ] && [ -n "${COSIGN_KEY_FILE:-}" ]; then
+if [ -z "${COSIGN_PASSWORD+set}" ] && [ -n "${COSIGN_KEY_FILE:-}" ]; then
   KV_PW=$(az keyvault secret show --vault-name cogos-kv-16d2bb --name cosign-password --query value -o tsv 2>/dev/null || true)
   if [ -n "$KV_PW" ]; then
-    COSIGN_PASSWORD="$KV_PW"
+    # KV refuses empty-string secrets, so cosign-regenerate stores
+    # __EMPTY__ as a sentinel meaning "no password protection." Translate
+    # it back so cosign sees the real empty string.
+    if [ "$KV_PW" = "__EMPTY__" ]; then COSIGN_PASSWORD=""; else COSIGN_PASSWORD="$KV_PW"; fi
+    export COSIGN_PASSWORD
     echo "[deploy] auto-fetched COSIGN_PASSWORD from Key Vault"
   fi
 fi
@@ -67,9 +71,13 @@ fi
 
 echo ""
 echo "[deploy] [2/3] az containerapp update (revision roll, ~30s)..."
+# Set COGOS_IMAGE_TAG on the env so /trust's "Image tag" tile renders the
+# tag of THIS deploy. Without it, src/trust.js falls back to the static
+# package.json version (e.g. "0.1.0") which drifts from the live tag.
 az containerapp update \
   --subscription "${SUB}" -g "${RG}" -n "${APP_NAME}" \
   --image "${NEW_IMAGE}" \
+  --set-env-vars "COGOS_IMAGE_TAG=${NEXT_TAG}" \
   --query "{revision:properties.latestRevisionName, image:properties.template.containers[0].image}" \
   -o table
 

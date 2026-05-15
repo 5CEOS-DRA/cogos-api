@@ -669,6 +669,18 @@ if (require.main === module) {
   const port = Number(process.env.PORT || 4444);
   app.listen(port, async () => {
     logger.info('cogos_api_listening', { port });
+    // Resolve the Data Encryption Key once at startup so the source is
+    // visible in logs (env / file / generated). The DEK is the wrapping
+    // key for HMAC secrets + the attestation signing PEM — both encrypted
+    // at rest under AES-256-GCM. See src/dek.js + STATE.md.
+    // We deliberately do NOT log the key path or the key itself.
+    try {
+      const dek = require('./dek');
+      dek.getDek();
+      logger.info('dek_resolved', { source: dek.getSource() });
+    } catch (e) {
+      logger.error('dek_resolution_failed', { error: e.message });
+    }
     // Pre-seed the default package so quota enforcement has something to
     // resolve against on a fresh deploy. Idempotent.
     try {

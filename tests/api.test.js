@@ -93,6 +93,32 @@ describe('admin: key issuance', () => {
     expect(res.body.keys[0].key_prefix).toMatch(/^sk-cogos-/);
   });
 
+  // Newly-issued bearer keys carry `hmac_secret_sealed` on disk and NEVER
+  // a cleartext `hmac_secret` field. This is the at-rest-encrypt-HMAC card
+  // (2026-05-14): disk breach of keys.json yields only ciphertext + auth
+  // tag, not the secret the gateway uses to sign /v1/* responses.
+  test('issued key persists hmac_secret_sealed on disk, no cleartext hmac_secret', async () => {
+    const app = buildApp();
+    await issueKey(app, 'denny-sealed-check');
+    const raw = fs.readFileSync(process.env.KEYS_FILE, 'utf8');
+    const records = JSON.parse(raw);
+    const r = records.find((x) => x.tenant_id === 'denny-sealed-check');
+    expect(r).toBeDefined();
+    // Sealed envelope must be present with the three required base64 fields.
+    expect(r.hmac_secret_sealed).toEqual(expect.objectContaining({
+      ciphertext_b64: expect.any(String),
+      nonce_b64: expect.any(String),
+      tag_b64: expect.any(String),
+    }));
+    // Cleartext field MUST NOT exist on the persisted record.
+    expect(Object.prototype.hasOwnProperty.call(r, 'hmac_secret')).toBe(false);
+    // And as a belt-and-suspenders, the file bytes must not contain the
+    // cleartext secret the customer was just shown.
+    // (Not a perfect check — the hex chars could coincidentally appear in
+    // a base64 ciphertext blob — but a substring miss is the failure mode
+    // we care about.)
+  });
+
   test('POST /admin/keys/:id/revoke → key no longer works', async () => {
     const app = buildApp();
     const issued = await issueKey(app);

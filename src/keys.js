@@ -10,6 +10,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const dek = require('./dek');
 
 const KEYS_FILE = process.env.KEYS_FILE
   || path.join(__dirname, '..', 'data', 'keys.json');
@@ -78,8 +79,48 @@ function newKeyPlaintext() {
 // X-Cogos-Signature on every /v1/* response. Stored in the record so the
 // gateway can sign responses; shown to the customer ONCE at issue time
 // alongside the API key (and never re-displayed).
+//
+// AT-REST REPRESENTATION (revised 2026-05-14, sec-encrypt-at-rest card):
+// the on-disk record carries `hmac_secret_sealed: {ciphertext_b64,
+// nonce_b64, tag_b64}` instead of cleartext `hmac_secret`. See src/dek.js
+// for the envelope-encryption substrate. Backward compatible: legacy
+// records with cleartext `hmac_secret` keep working — readers fall back
+// to the cleartext field when `hmac_secret_sealed` is absent, and the
+// next touch of the record (verify's last_used_at write, etc.) will
+// migrate it to the sealed shape.
 function newHmacSecret() {
   return crypto.randomBytes(32).toString('hex');
+}
+
+// Seal a cleartext HMAC secret (hex string) under the DEK. Returns the
+// envelope object suitable for direct embedding in a record under
+// `hmac_secret_sealed`.
+function _sealHmacSecret(secretHex) {
+  return dek.seal(Buffer.from(String(secretHex), 'utf8'));
+}
+
+// Decrypt a record's HMAC secret. Returns:
+//   - record.hmac_secret_sealed → opened cleartext hex string
+//   - record.hmac_secret (legacy cleartext fallback) → as-is
+//   - neither present → null (caller decides whether to lazy-generate)
+// Never throws on shape errors; returns null instead so the caller can
+// take the lazy-backfill branch.
+function _decryptHmacSecret(record) {
+  if (!record) return null;
+  if (dek.isSealed(record.hmac_secret_sealed)) {
+    try {
+      return dek.open(record.hmac_secret_sealed).toString('utf8');
+    } catch (_e) {
+      // Wrong DEK or tampered ciphertext. Treat as missing so the caller
+      // can decide whether to fail the request or backfill. Surfacing as
+      // null avoids leaking the wrong-DEK signal through the auth path.
+      return null;
+    }
+  }
+  if (typeof record.hmac_secret === 'string' && record.hmac_secret) {
+    return record.hmac_secret;
+  }
+  return null;
 }
 
 // Generate a stable ed25519 key id for the Authorization header `keyId=`
@@ -177,6 +218,12 @@ function issue({
     x25519_private_pem = x.privateKey.export({ type: 'pkcs8', format: 'pem' });
   }
 
+  // At rest the HMAC secret is sealed under the DEK. Cleartext is held
+  // only on this function's stack + the return payload (so the caller can
+  // show it to the customer ONCE). The on-disk record carries only the
+  // sealed envelope. See src/dek.js + the _decryptHmacSecret() helper.
+  const hmac_secret_sealed = _sealHmacSecret(hmac_secret);
+
   const record = {
     id: crypto.randomUUID(),
     scheme,                      // 'bearer' | 'ed25519' — dispatcher hint
@@ -185,7 +232,7 @@ function issue({
     ed25519_key_id,              // ed25519-only; null for bearer
     pubkey_pem,                  // ed25519-only; null for bearer
     x25519_pubkey_pem,           // ed25519-only sealing pubkey; null for bearer
-    hmac_secret,                 // used to sign /v1/* responses; surfaced to caller below
+    hmac_secret_sealed,          // sealed envelope; replaces cleartext hmac_secret at rest
     tenant_id: tenantId,
     app_id: resolvedAppId,       // partition key for audit chain + anomaly + future RBAC
     label,
@@ -210,7 +257,12 @@ function issue({
     x25519_private_pem,           // null for bearer (sealing/decryption private)
     x25519_pubkey_pem,            // null for bearer (sealing/encryption public)
     hmac_secret,
-    record: { ...record, key_hash: undefined, hmac_secret: undefined },
+    record: {
+      ...record,
+      key_hash: undefined,
+      hmac_secret: undefined,
+      hmac_secret_sealed: undefined,
+    },
   };
 }
 
@@ -228,7 +280,14 @@ function findByEd25519KeyId(keyId) {
   // never has to special-case null. We do NOT rewrite the file — the
   // record on disk stays untagged, which keeps the original snapshot
   // recoverable if the migration semantics ever need to change.
+  //
+  // HMAC secret read-time decrypt: downstream chat-api.js reads
+  // req.apiKey.hmac_secret to sign /v1/* responses. Materialize the
+  // cleartext here from the sealed envelope (or the legacy cleartext
+  // field on pre-migration records). Disk record stays sealed.
   const out = { ...found, key_hash: undefined };
+  const hmacCleartext = _decryptHmacSecret(found);
+  if (hmacCleartext) out.hmac_secret = hmacCleartext;
   if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
   return out;
 }
@@ -255,7 +314,15 @@ function findByStripeCustomer(stripeCustomerId) {
   const records = readAll();
   const found = records.find((r) => r.stripe_customer_id === stripeCustomerId && r.active);
   if (!found) return null;
-  return { ...found, key_hash: undefined };
+  // Strip all HMAC material — this path is for webhook status updates
+  // (subscription change → toggle active) and downstream callers should
+  // not be handling cleartext secrets here.
+  return {
+    ...found,
+    key_hash: undefined,
+    hmac_secret: undefined,
+    hmac_secret_sealed: undefined,
+  };
 }
 
 // Update an existing record's Stripe metadata + optionally toggle active.
@@ -280,17 +347,38 @@ function verify(plaintext) {
   const hash = hashKey(plaintext);
   const found = records.find((r) => r.key_hash === hash && r.active);
   if (!found) return null;
-  // Best-effort last_used_at touch + lazy hmac_secret backfill for keys
-  // issued before HMAC signing was introduced. The customer can never
-  // see the backfilled secret (not on success page anymore), but the
-  // gateway can still sign responses for it. To get a verifiable
-  // signature, the customer rotates to a new key.
+  // Resolve the cleartext HMAC secret. Order:
+  //   1. found.hmac_secret_sealed → open under DEK (the new shape).
+  //   2. found.hmac_secret (legacy cleartext) → use as-is.
+  //   3. neither present → lazy-generate a fresh one (keys issued before
+  //      HMAC signing was introduced). The customer can never see the
+  //      backfilled secret (not on the success page anymore), but the
+  //      gateway can still sign responses for it. To get a verifiable
+  //      signature, the customer rotates to a new key.
+  let hmacCleartext = _decryptHmacSecret(found);
+  let didMigrate = false;
+  if (!hmacCleartext) {
+    hmacCleartext = newHmacSecret();
+    didMigrate = true;
+  }
+  // Best-effort last_used_at touch + lazy migration to the sealed shape.
+  // Any record that gets touched on the verify path is rewritten with
+  // hmac_secret_sealed and cleartext hmac_secret stripped — the disk
+  // moves toward fully-sealed-at-rest one verify at a time. Records
+  // that never verify stay in whatever shape they were issued in
+  // (operator can force a touch by listing + writing if desired).
   try {
     found.last_used_at = new Date().toISOString();
-    if (!found.hmac_secret) found.hmac_secret = newHmacSecret();
+    if (!found.hmac_secret_sealed || didMigrate) {
+      found.hmac_secret_sealed = _sealHmacSecret(hmacCleartext);
+    }
+    if ('hmac_secret' in found) delete found.hmac_secret;
     writeAll(records);
   } catch (_e) { /* no-op */ }
-  const out = { ...found, key_hash: undefined };
+  // Materialize an in-memory record for the request path. Downstream
+  // chat-api.js reads req.apiKey.hmac_secret, so we attach the cleartext
+  // hex here. The on-disk record stays sealed.
+  const out = { ...found, key_hash: undefined, hmac_secret: hmacCleartext };
   // app_id read-time backfill: pre-multi-app records have no app_id.
   // Treat absent as DEFAULT_APP_ID so chat-api can always pass a
   // concrete app_id to usage.record() without a null-coalesce on every
@@ -316,7 +404,15 @@ function list({ tenant_id, app_id } = {}) {
     throw new Error('app_id filter requires tenant_id');
   }
   return rows.map((r) => {
-    const out = { ...r, key_hash: undefined };
+    // Strip both key_hash AND any HMAC secret material (sealed envelope
+    // or legacy cleartext). The /admin/keys list surface should never
+    // surface either — operators see metadata only.
+    const out = {
+      ...r,
+      key_hash: undefined,
+      hmac_secret: undefined,
+      hmac_secret_sealed: undefined,
+    };
     if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
     return out;
   });

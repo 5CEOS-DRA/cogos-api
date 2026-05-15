@@ -139,16 +139,18 @@ describe('session — failure modes', () => {
   test('expired session → null', () => {
     // We can't easily backdate createSession (it uses Date.now()), but
     // we can mock the canonical builder by signing a payload ourselves
-    // using the same secret. Forge a payload with exp_ms in the past
-    // and sign it with the real secret to confirm parseSession rejects
-    // on the expiration check (post-signature-verify).
+    // using the resolved secret. Read the module's actual secret state
+    // so we don't rely on env-var ordering across worker reuse — this
+    // is the contract that matters anyway (sign with the same secret
+    // the parser will resolve), and pinning to _peekSecretHex() drops
+    // any cross-test sensitivity to env-var precedence ordering.
     const crypto = require('crypto');
     const past = Date.now() - 60_000;
     const payloadJson = JSON.stringify({
       tenant_id: 't1', key_id: 'k1', app_id: 'a1', exp_ms: past,
     });
     const payloadBytes = Buffer.from(payloadJson, 'utf8');
-    const secret = Buffer.from(SECRET_A, 'hex');
+    const secret = Buffer.from(session._test._peekSecretHex(), 'hex');
     const sig = crypto.createHmac('sha256', secret).update(payloadBytes).digest();
     const cookie = `${payloadBytes.toString('base64url')}.${sig.toString('base64url')}`;
     expect(session.parseSession(cookie)).toBeNull();
@@ -179,7 +181,7 @@ describe('session — failure modes', () => {
   test('payload that decodes to non-JSON → null', () => {
     const crypto = require('crypto');
     const garbage = Buffer.from('not json at all', 'utf8');
-    const secret = Buffer.from(SECRET_A, 'hex');
+    const secret = Buffer.from(session._test._peekSecretHex(), 'hex');
     const sig = crypto.createHmac('sha256', secret).update(garbage).digest();
     const cookie = `${garbage.toString('base64url')}.${sig.toString('base64url')}`;
     expect(session.parseSession(cookie)).toBeNull();
@@ -191,7 +193,7 @@ describe('session — failure modes', () => {
       key_id: 'k1', app_id: 'a1', exp_ms: Date.now() + 60_000,
     });
     const payloadBytes = Buffer.from(payloadJson, 'utf8');
-    const secret = Buffer.from(SECRET_A, 'hex');
+    const secret = Buffer.from(session._test._peekSecretHex(), 'hex');
     const sig = crypto.createHmac('sha256', secret).update(payloadBytes).digest();
     const cookie = `${payloadBytes.toString('base64url')}.${sig.toString('base64url')}`;
     expect(session.parseSession(cookie)).toBeNull();

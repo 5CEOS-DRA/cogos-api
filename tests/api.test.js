@@ -7,10 +7,14 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
-// Isolate keys + usage files per test run.
+// Isolate keys + usage + packages files per test run. PACKAGES_FILE was
+// added 2026-05-15 (daily-caps card) so the per-tier add inside the
+// daily-cap-enforcement describe at the bottom doesn't pollute the
+// repo-level data/packages.json.
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-api-test-'));
 process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
 process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
+process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
 process.env.OLLAMA_URL = 'http://ollama.test';
 process.env.DEFAULT_MODEL = 'qwen2.5:3b-instruct';
 
@@ -329,5 +333,69 @@ describe('CogOS tier aliases', () => {
     expect(res.status).toBe(200);
     expect(capturedModel).toBe('qwen2.5:3b-instruct');
     expect(res.headers['x-cogos-model']).toBe('qwen2.5:3b-instruct');
+  });
+});
+
+// =============================================================================
+// Daily cap enforcement on /v1/chat/completions
+// =============================================================================
+//
+// One end-to-end check that the enforceDailyCap middleware is mounted
+// BEFORE enforcePackage and returns 429 daily_quota_exceeded once the
+// per-day request budget is spent. The cap-module unit tests in
+// tests/daily-cap.test.js cover the counter mechanics; this case verifies
+// the wire shape.
+describe('daily-cap enforcement on /v1/chat/completions', () => {
+  test('tier with daily_request_cap=1 → 1st OK, 2nd 429 + Retry-After', async () => {
+    // Reset the in-process counter so a prior test isn't leaking state
+    // into this one (the daily-cap module is process-wide; jest doesn't
+    // give us a fresh module instance per test).
+    const dailyCap = require('../src/daily-cap');
+    dailyCap._test._reset();
+
+    const packages = require('../src/packages');
+    const tierId = 'cap-tier-' + Math.floor(Math.random() * 1e9).toString(36);
+    await packages.create({
+      id: tierId,
+      display_name: 'Daily Cap Test',
+      monthly_usd: 0,
+      monthly_request_quota: 1000,
+      allowed_model_tiers: ['cogos-tier-b'],
+      daily_request_cap: 1,
+    });
+
+    nock('http://ollama.test')
+      .post('/api/chat')
+      .twice()
+      .reply(200, {
+        message: { role: 'assistant', content: 'ok' },
+        prompt_eval_count: 5,
+        eval_count: 2,
+      });
+
+    const app = buildApp();
+    const { api_key } = await issueKey(app, 'cap-tenant', tierId);
+
+    const r1 = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+    expect(r1.status).toBe(200);
+    expect(r1.headers['x-cogos-daily-request-limit']).toBe('1');
+    expect(r1.headers['x-cogos-daily-request-used']).toBe('1');
+
+    const r2 = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${api_key}`)
+      .send({ messages: [{ role: 'user', content: 'hi again' }] });
+    expect(r2.status).toBe(429);
+    expect(r2.body.error.type).toBe('daily_quota_exceeded');
+    expect(r2.body.error.reason).toBe('request_cap');
+    expect(r2.body.error.limits.request_cap).toBe(1);
+    // Retry-After must be present, an integer, and ≤ one day in seconds.
+    const retryAfter = Number(r2.headers['retry-after']);
+    expect(Number.isFinite(retryAfter)).toBe(true);
+    expect(retryAfter).toBeGreaterThan(0);
+    expect(retryAfter).toBeLessThanOrEqual(86400);
   });
 });

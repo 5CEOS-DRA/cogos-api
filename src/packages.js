@@ -270,11 +270,28 @@ function validateNew(input) {
   }
   // Additive validators — optional fields whose default-absent semantics
   // are "feature off." Each branch is its own `if (input.X !== undefined)`
-  // so the companion daily-caps agent can add sibling clauses for
-  // daily_request_cap / daily_fallback_token_cap without touching this
-  // block. KEEP THIS PATTERN: no shared `else` chains.
+  // so future cards can add sibling clauses without touching this block.
+  // KEEP THIS PATTERN: no shared `else` chains.
   if (input.public_signup !== undefined && typeof input.public_signup !== 'boolean') {
     errors.push('public_signup must be a boolean if present');
+  }
+  // Daily caps (free-tier card, 2026-05-15). Both fields are optional;
+  // null/undefined means unlimited at the daily-cap layer (the monthly
+  // quota above remains the always-on backstop). When present they must
+  // be positive integers — we treat 0 as "always 429", which is a silly
+  // tier but a legitimate operator choice so we don't reject it. Negative
+  // / fractional / huge values are rejected.
+  if (input.daily_request_cap !== undefined && input.daily_request_cap !== null) {
+    const drc = Number(input.daily_request_cap);
+    if (!Number.isInteger(drc) || drc < 0 || drc > 100_000_000) {
+      errors.push('daily_request_cap must be a non-negative integer ≤ 100M (or null)');
+    }
+  }
+  if (input.daily_fallback_token_cap !== undefined && input.daily_fallback_token_cap !== null) {
+    const dtc = Number(input.daily_fallback_token_cap);
+    if (!Number.isInteger(dtc) || dtc < 0 || dtc > 10_000_000_000) {
+      errors.push('daily_fallback_token_cap must be a non-negative integer ≤ 10B (or null)');
+    }
   }
   return errors;
 }
@@ -323,6 +340,17 @@ async function create(input) {
     monthly_usd: Number(input.monthly_usd),
     monthly_request_quota: Number(input.monthly_request_quota),
     allowed_model_tiers: [...input.allowed_model_tiers],
+    // Daily caps — optional; null = unlimited (legacy default for any
+    // existing package that pre-dates this card). See validateNew() for
+    // the accepted shape. Free-tier package will set both to small ints.
+    daily_request_cap:
+      input.daily_request_cap === undefined || input.daily_request_cap === null
+        ? null
+        : Number(input.daily_request_cap),
+    daily_fallback_token_cap:
+      input.daily_fallback_token_cap === undefined || input.daily_fallback_token_cap === null
+        ? null
+        : Number(input.daily_fallback_token_cap),
     is_default: Boolean(input.is_default) || false,
     active: true,
     created_at: new Date().toISOString(),
@@ -374,6 +402,14 @@ async function update(id, patch) {
     allowed_model_tiers: patch.allowed_model_tiers !== undefined
       ? [...patch.allowed_model_tiers]
       : old.allowed_model_tiers,
+    // Daily caps: explicit null in patch clears (back to unlimited);
+    // absent keeps the existing value; number coerces through Number().
+    daily_request_cap: patch.daily_request_cap !== undefined
+      ? (patch.daily_request_cap === null ? null : Number(patch.daily_request_cap))
+      : (old.daily_request_cap === undefined ? null : old.daily_request_cap),
+    daily_fallback_token_cap: patch.daily_fallback_token_cap !== undefined
+      ? (patch.daily_fallback_token_cap === null ? null : Number(patch.daily_fallback_token_cap))
+      : (old.daily_fallback_token_cap === undefined ? null : old.daily_fallback_token_cap),
     is_default: patch.is_default !== undefined ? Boolean(patch.is_default) : old.is_default,
     public_signup: patch.public_signup !== undefined
       ? Boolean(patch.public_signup)

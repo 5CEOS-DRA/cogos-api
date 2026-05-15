@@ -148,6 +148,7 @@ Nothing significant — everything in `main` as of `c9f4bc3` is live on revision
 
 | Item | Scope | Blocker |
 |---|---|---|
+| **Operator analytics — Management Console "CogOS Analytics" tab** *(2026-05-15 request)* | Google-Analytics-shaped view of substrate activity: signups/day (free + paid), API calls/hr, anomaly hits, honeypot hits, rate-limit 429s, daily-cap 429s, active tenants, revenue (Stripe). Two-part: (a) cogos-api side — new `/admin/analytics/*` endpoints returning aggregated time-series JSON; (b) `5ceos-platform-internal` side — new "CogOS Analytics" Management Console tab that fetches + charts. | Two-repo coordination. cogos-api side is ~3-4h agent work; Management Console side depends on 5ceos-platform-internal's UI patterns |
 | Public hash-chain head checkpoint endpoint | Add `GET /audit/checkpoint/latest`, optionally publish to Azure Blob hourly via Container App Job | None — straightforward; just hasn't shipped |
 | Isolate-per-request (Week 4) | WASM/Wasmtime port of `src/chat-api.js` handler; runs in fresh isolate per request, no persistent state, no host syscall surface | ~1 focused week of work; not parallelizable |
 | Cookbook recipe for Ed25519 signing | Python + Node recipe added to `/cookbook`, anchor `#ed25519-sign` | Small follow-up; SDK examples |

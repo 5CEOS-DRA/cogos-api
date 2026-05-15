@@ -166,6 +166,15 @@ function loginHtml({ error } = {}) {
   <div class="warn">
     <strong>Lost or rotated all your keys?</strong> Use <a href="/dashboard/forgot">key recovery</a> &mdash; enter the email you signed up or subscribed with and we&apos;ll send a single-use link to mint a fresh key under the same tenant.
   </div>
+  <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-top:18px;line-height:1.6">
+    <strong style="color:#3fb950">🎁 Don&apos;t have a key yet?</strong>
+    <div style="margin-top:6px">
+      <a href="/#try-free" style="color:#79c0ff;font-weight:600">Try free, no card &rarr;</a>
+      &middot;
+      <a href="/#pricing" style="color:#79c0ff;font-weight:600">See pricing &rarr;</a>
+    </div>
+    <div style="color:#8b949e;font-size:12px;margin-top:6px">Sign up (free or paid) → key shown once → come back here and paste it. The signup IS the account creation.</div>
+  </div>
 `;
   return wrap({ title: 'CogOS — dashboard sign-in', bodyHtml: body });
 }

@@ -179,7 +179,7 @@ function renderLandingHtml(packages = []) {
     <a href="/demo" style="color:#3fb950;font-weight:600">Open the demo &rarr;</a>
   </div>
 
-  <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
+  <div id="try-free" style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
     <strong style="color:#3fb950">&#127873; Try free, no card.</strong>
     100 requests/day on Tier B (3B Qwen, schema-locked, signed responses). One curl to get a key.
     <form action="/signup/free" method="POST" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
@@ -297,7 +297,7 @@ function renderLandingHtml(packages = []) {
     Which means we get to <strong>hold pricing</strong>, refuse the <strong>growth-at-all-costs playbook</strong>, and keep the substrate <strong>determinism-first</strong> — instead of optimizing for the next funding round. Your tier won't get re-priced under you, the audit trail won't become a paid add-on, the bench stays open, and the substrate stays the substrate. We get to dream and build instead of pitch and exit.
   </div>
 
-  <h2>Pricing</h2>
+  <h2 id="pricing">Pricing</h2>
 ${PRICING_HTML}
 
 ${ADDONS_HTML}

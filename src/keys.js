@@ -126,6 +126,11 @@ function newEd25519KeyId() {
 // Bearer-scheme keys are NOT issued an x25519 keypair. A bearer
 // customer's audit rows stay cleartext (sealed:false), which matches
 // the doctrine that sealing is opt-in via the ed25519 scheme.
+// Default key expiration: 1 year from issuance. Long-lived secrets get
+// stolen; an explicit ceiling forces a rotation/renewal cadence. Tunable
+// per-tier in the future; for v1 every tier gets the same window.
+const DEFAULT_KEY_LIFETIME_MS = 365 * 24 * 60 * 60_000;
+
 function issue({
   tenantId,
   app_id = null,
@@ -134,10 +139,29 @@ function issue({
   package_id = null,
   stripe = null,
   scheme = 'bearer',
+  expires_at_iso = null,
 } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
     throw new Error(`unknown scheme: ${scheme}`);
+  }
+  // Resolve expires_at. Caller-provided ISO wins; otherwise default to
+  // now + DEFAULT_KEY_LIFETIME_MS. We accept and re-serialize so a malformed
+  // string fails LOUDLY at issue time, not later at verify time. A past
+  // ISO is allowed (operator may issue an already-expired key for testing
+  // / negative scenarios); auth path treats it as expired.
+  let resolvedExpiresAt = null;
+  if (expires_at_iso != null && expires_at_iso !== '') {
+    if (typeof expires_at_iso !== 'string') {
+      throw new Error('expires_at_iso must be a string');
+    }
+    const parsed = Date.parse(expires_at_iso);
+    if (!Number.isFinite(parsed)) {
+      throw new Error('expires_at_iso must be a parseable ISO-8601 timestamp');
+    }
+    resolvedExpiresAt = new Date(parsed).toISOString();
+  } else {
+    resolvedExpiresAt = new Date(Date.now() + DEFAULT_KEY_LIFETIME_MS).toISOString();
   }
   // Validate-and-normalize. Null/undefined/empty all collapse to
   // DEFAULT_APP_ID so callers who never pass app_id still get a sane tag.
@@ -198,6 +222,11 @@ function issue({
     stripe_subscription_id: (stripe && stripe.subscription_id) || null,
     stripe_subscription_status: (stripe && stripe.status) || null,
     customer_email: (stripe && stripe.email) || null,
+    // Lifecycle: expires_at is set at issue time and never extended.
+    // Auth path rejects with `expired_api_key` past this point. A future
+    // commit adds rotation_grace_until + quarantined_at to this record;
+    // their absence is read as "not in grace" / "not quarantined."
+    expires_at: resolvedExpiresAt,
   };
   const records = readAll();
   records.push(record);
@@ -344,4 +373,5 @@ module.exports = {
   normalizeAppId,
   PREFIX,
   DEFAULT_APP_ID,
+  DEFAULT_KEY_LIFETIME_MS,
 };

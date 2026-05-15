@@ -486,7 +486,9 @@ function createApp() {
   //     persist only the public PEM + a stable keyId. No reusable customer
   //     auth material at rest on our side. Customer signs every request.
   app.post('/admin/keys', adminAuth, (req, res) => {
-    const { tenant_id, app_id, label, tier, scheme } = req.body || {};
+    const {
+      tenant_id, app_id, label, tier, scheme, expires_at_iso,
+    } = req.body || {};
     if (!tenant_id) {
       return res.status(400).json({ error: { message: 'tenant_id required' } });
     }
@@ -502,12 +504,17 @@ function createApp() {
       // anomaly bucket. Null/undefined → keys.issue() defaults to
       // '_default' (validated in src/keys.js — slug shape, max 64).
       // Shape errors surface as 400.
+      //
+      // expires_at_iso (optional, lifecycle card): caller can override
+      // the default 1-year expiration window. Past timestamps allowed
+      // for operator testing — the auth path treats them as expired.
       issued = keys.issue({
         tenantId: tenant_id,
         app_id,
         label,
         tier,
         scheme: requestedScheme,
+        expires_at_iso: expires_at_iso || null,
       });
     } catch (e) {
       return res.status(400).json({ error: { message: e.message } });
@@ -525,6 +532,10 @@ function createApp() {
     // of bearer vs ed25519 auth) gets HMAC-signed /v1 responses they should
     // be able to verify. Without it on this response, operator-issued keys
     // have no way to verify the X-Cogos-Signature header.
+    //
+    // expires_at is surfaced so the customer + their SDK know when to
+    // rotate. The default is 1 year from now; operator can override via
+    // expires_at_iso on the request.
     const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
@@ -532,6 +543,7 @@ function createApp() {
       tier: record.tier,
       scheme: requestedScheme,
       issued_at: record.issued_at,
+      expires_at: record.expires_at,
       hmac_secret, // shown ONCE; used to verify X-Cogos-Signature on /v1/*
       warning: 'Save this key + hmac_secret now. They will not be shown again.',
     };

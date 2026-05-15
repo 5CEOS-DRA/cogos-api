@@ -3,6 +3,31 @@
 const crypto = require('node:crypto');
 const { verify, findByEd25519KeyId, touchLastUsed, PREFIX } = require('./keys');
 
+// Lifecycle gate shared by both bearer + ed25519 auth paths.
+// Returns null if the record is auth-OK. Returns {status, body} otherwise
+// so the caller can short-circuit to the right 401 with a precise
+// error.type. Distinct error.type values matter for customer-side
+// debugging — `expired_api_key` is the actionable form of
+// `invalid_api_key` (rotate to fix). Quarantine and rotation-grace are
+// added in later commits in this same series.
+function checkLifecycle(record /* , res */) {
+  if (record && record.expires_at) {
+    const exp = Date.parse(record.expires_at);
+    if (Number.isFinite(exp) && Date.now() > exp) {
+      return {
+        status: 401,
+        body: {
+          error: {
+            message: 'API key has expired. Rotate via POST /v1/keys/rotate.',
+            type: 'expired_api_key',
+          },
+        },
+      };
+    }
+  }
+  return null;
+}
+
 // Bearer auth for customer API calls. On success, attaches req.apiKey =
 // the key record (without hash).
 function bearerAuth(req, res, next) {
@@ -24,6 +49,8 @@ function bearerAuth(req, res, next) {
       error: { message: 'Invalid or revoked API key', type: 'invalid_api_key' },
     });
   }
+  const gate = checkLifecycle(record, res);
+  if (gate) return res.status(gate.status).json(gate.body);
   req.apiKey = record;
   next();
 }
@@ -170,6 +197,12 @@ function ed25519Auth(req, res, next) {
       error: { message: 'Signature verification failed', type: 'invalid_api_key' },
     });
   }
+
+  // Lifecycle gate — currently checks expiration only. Runs AFTER
+  // signature verification so a malformed signature doesn't reveal
+  // lifecycle state to unauthenticated probes.
+  const gate = checkLifecycle(record, res);
+  if (gate) return res.status(gate.status).json(gate.body);
 
   // Strip pubkey_pem from req.apiKey to keep the downstream shape tight —
   // it's persisted state, not request state. tenant_id / tier / package_id

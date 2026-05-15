@@ -30,6 +30,8 @@ process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
 process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
 process.env.STRIPE_EVENTS_FILE = path.join(tmpDir, 'stripe-events.json');
 process.env.SESSION_SECRET_FILE = path.join(tmpDir, '.session-secret');
+process.env.MAGIC_LINK_SECRET_FILE = path.join(tmpDir, '.magic-link-secret');
+process.env.COGOS_MAGIC_LINK_SECRET = 'a1'.repeat(32);
 process.env.ATTESTATION_KEY_FILE = path.join(tmpDir, 'attestation-key.pem');
 process.env.DEK_FILE = path.join(tmpDir, '.dek');
 process.env.OLLAMA_URL = 'http://ollama.test';
@@ -422,7 +424,7 @@ describe('POST /dashboard/logout', () => {
 });
 
 // =============================================================================
-describe('GET /dashboard/forgot', () => {
+describe('GET /dashboard/forgot — magic-link recovery form', () => {
   let app;
   beforeEach(() => {
     resetState();
@@ -430,13 +432,315 @@ describe('GET /dashboard/forgot', () => {
     app = require('../src/index').createApp();
   });
 
-  test('returns 200 HTML stub with mailto fallback', async () => {
+  test('returns 200 HTML with email form + mailto fallback', async () => {
     const res = await request(app).get('/dashboard/forgot');
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toMatch(/html/);
     expect(res.text).toMatch(/Key recovery/i);
+    expect(res.text).toMatch(/<form[^>]*action="\/dashboard\/forgot"[^>]*method="POST"/);
+    expect(res.text).toMatch(/<input[^>]*type="email"[^>]*name="email"/);
+    // Mailto fallback to support is still surfaced for edge cases.
     expect(res.text).toMatch(/support@5ceos\.com/);
     expect(res.text).toMatch(/%5BSECURITY%5D/);
+  });
+});
+
+// =============================================================================
+describe('POST /dashboard/forgot — non-enumeration contract', () => {
+  let app;
+  let keys;
+  let notifySignup;
+
+  beforeEach(() => {
+    resetState();
+    seedPackages(defaultPackages());
+    app = require('../src/index').createApp();
+    keys = require('../src/keys');
+    notifySignup = require('../src/notify-signup');
+    // Spy on forwardEmail so we can assert it's called for known emails.
+    // resolved-promise return matches the real shape.
+    jest.spyOn(notifySignup, 'forwardEmail').mockResolvedValue({
+      sent: true, transport: 'ses', status: 200,
+    });
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function postForgot(email) {
+    return request(app)
+      .post('/dashboard/forgot')
+      .type('form')
+      .send({ email });
+  }
+
+  test('existing-tenant email by customer_email → 200 + same body + SES call attempted', async () => {
+    keys.issue({
+      tenantId: 'tenant-recover-1',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'paid customer',
+      stripe: { email: 'paid@example.com', customer_id: 'cus_x' },
+    });
+    const res = await postForgot('paid@example.com');
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Check your inbox/i);
+    expect(res.text).toMatch(/if an account exists/i);
+    // Fire-and-forget SES call happened.
+    // (mock is a Promise, so the spy registers the invocation synchronously)
+    expect(notifySignup.forwardEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('existing-tenant email by free-signup label → 200 + same body + SES call attempted', async () => {
+    keys.issue({
+      tenantId: 'tenant-recover-2',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'free-signup:alice@example.com',
+    });
+    const res = await postForgot('alice@example.com');
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Check your inbox/i);
+    expect(notifySignup.forwardEmail).toHaveBeenCalledTimes(1);
+  });
+
+  test('unknown email → SAME 200 + SAME confirmation page (no enumeration)', async () => {
+    const res = await postForgot('stranger@example.com');
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Check your inbox/i);
+    // No SES call for unknowns — the mail-deliverability path is the
+    // ONLY thing that distinguishes known vs unknown server-side; the
+    // HTTP response itself is identical.
+    expect(notifySignup.forwardEmail).not.toHaveBeenCalled();
+  });
+
+  test('non-enumeration: known + unknown emails return byte-equal HTML', async () => {
+    keys.issue({
+      tenantId: 'tenant-recover-3',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'free-signup:known@example.com',
+    });
+    const known = await postForgot('known@example.com');
+    const unknown = await postForgot('totally-unknown@example.com');
+    // Both responses share status code AND body shape (modulo the
+    // echoed email, which is the only differentiator and intentionally
+    // matches what the user typed).
+    expect(known.status).toBe(unknown.status);
+    expect(known.status).toBe(200);
+    // Replace the user-echoed email in both bodies so we can compare
+    // the chrome byte-for-byte.
+    const norm = (s, e) => s.replace(new RegExp(e, 'g'), 'X@X');
+    expect(norm(known.text, 'known@example.com'))
+      .toBe(norm(unknown.text, 'totally-unknown@example.com'));
+  });
+
+  test('malformed email → SAME 200 (no validator-based oracle)', async () => {
+    const res = await postForgot('not-an-email');
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Check your inbox/i);
+    // We never call SES on a malformed email — same as "no match".
+    expect(notifySignup.forwardEmail).not.toHaveBeenCalled();
+  });
+
+  test('revoked-only key for an email → no SES (treated as no match)', async () => {
+    const issued = keys.issue({
+      tenantId: 'tenant-revoked',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'free-signup:gone@example.com',
+    });
+    keys.revoke(issued.record.id);
+    const res = await postForgot('gone@example.com');
+    expect(res.status).toBe(200);
+    expect(notifySignup.forwardEmail).not.toHaveBeenCalled();
+  });
+});
+
+// =============================================================================
+describe('GET /dashboard/auth — token verification + rotation', () => {
+  let app;
+  let keys;
+  let session;
+  let magicLink;
+  let issued;
+
+  beforeEach(() => {
+    resetState();
+    seedPackages(defaultPackages());
+    app = require('../src/index').createApp();
+    keys = require('../src/keys');
+    session = require('../src/session');
+    magicLink = require('../src/magic-link');
+    session._test._reset();
+    magicLink._test._reset();
+    issued = keys.issue({
+      tenantId: 'tenant-mlink',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'free-signup:carol@example.com',
+    });
+  });
+
+  test('valid token → 303 to /dashboard/rotate-result + Set-Cookie (session+display) + new key issued + old key in grace', async () => {
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-mlink',
+      key_id: issued.record.id,
+      email: 'carol@example.com',
+    });
+    const res = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(res.status).toBe(303);
+    expect(res.headers.location).toBe('/dashboard/rotate-result');
+    const setCookie = res.headers['set-cookie'];
+    expect(setCookie).toBeTruthy();
+    const flat = Array.isArray(setCookie) ? setCookie.join('\n') : setCookie;
+    expect(flat).toMatch(/cogos_session=[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+/);
+    expect(flat).toMatch(/cogos_recovery_display=/);
+    expect(flat).toMatch(/HttpOnly/);
+    expect(flat).toMatch(/SameSite=Strict/);
+
+    // New key issued under same tenant
+    const tenantKeys = keys.list().filter((k) => k.tenant_id === 'tenant-mlink');
+    expect(tenantKeys.length).toBe(2);
+    const old = tenantKeys.find((k) => k.id === issued.record.id);
+    const fresh = tenantKeys.find((k) => k.id !== issued.record.id);
+    expect(old.rotation_grace_until).toBeTruthy();
+    expect(fresh.active).toBe(true);
+    // 24h grace window (approx — ms-precision)
+    const graceMs = old.rotation_grace_until - Date.now();
+    expect(graceMs).toBeGreaterThan(23 * 60 * 60 * 1000);
+    expect(graceMs).toBeLessThan(25 * 60 * 60 * 1000);
+  });
+
+  test('invalid token → 400 + form-with-error', async () => {
+    const res = await request(app).get('/dashboard/auth?token=garbage');
+    expect(res.status).toBe(400);
+    expect(res.text).toMatch(/invalid, expired, or already used/i);
+    // No new key minted on failure
+    const tenantKeys = keys.list().filter((k) => k.tenant_id === 'tenant-mlink');
+    expect(tenantKeys.length).toBe(1);
+  });
+
+  test('expired token → 400 + form-with-error', async () => {
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-mlink',
+      key_id: issued.record.id,
+      email: 'carol@example.com',
+      ttlMs: -1000, // already expired
+    });
+    const res = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(res.status).toBe(400);
+    expect(res.text).toMatch(/invalid, expired, or already used/i);
+  });
+
+  test('replayed token → first call succeeds, second call 400', async () => {
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-mlink',
+      key_id: issued.record.id,
+      email: 'carol@example.com',
+    });
+    const first = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(first.status).toBe(303);
+    const second = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(second.status).toBe(400);
+    expect(second.text).toMatch(/invalid, expired, or already used/i);
+    // Only ONE new key minted (the second attempt didn't rotate again)
+    const tenantKeys = keys.list().filter((k) => k.tenant_id === 'tenant-mlink');
+    expect(tenantKeys.length).toBe(2);
+  });
+
+  test('token for a revoked key → 400 (rotate refused at re-check)', async () => {
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-mlink',
+      key_id: issued.record.id,
+      email: 'carol@example.com',
+    });
+    keys.revoke(issued.record.id);
+    const res = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(res.status).toBe(400);
+    expect(res.text).toMatch(/no longer active/i);
+  });
+
+  test('audit-log marker is written under the new key id', async () => {
+    const usage = require('../src/usage');
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-mlink',
+      key_id: issued.record.id,
+      email: 'carol@example.com',
+    });
+    await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    const rows = usage.readSlice({ tenant_id: 'tenant-mlink', limit: 10 });
+    const marker = rows.find((r) => r.route === '/dashboard/auth');
+    expect(marker).toBeTruthy();
+    expect(marker.status).toBe('magic_link_recovery');
+  });
+});
+
+// =============================================================================
+describe('GET /dashboard/rotate-result — show-once page', () => {
+  let app;
+  let keys;
+  let magicLink;
+  let issued;
+
+  beforeEach(() => {
+    resetState();
+    seedPackages(defaultPackages());
+    app = require('../src/index').createApp();
+    keys = require('../src/keys');
+    magicLink = require('../src/magic-link');
+    magicLink._test._reset();
+    issued = keys.issue({
+      tenantId: 'tenant-result',
+      app_id: '_default',
+      scheme: 'bearer',
+      label: 'free-signup:dave@example.com',
+    });
+  });
+
+  function recoveryDisplayCookie(authResponse) {
+    const setCookie = authResponse.headers['set-cookie'];
+    const headers = Array.isArray(setCookie) ? setCookie : [setCookie];
+    for (const h of headers) {
+      const m = /cogos_recovery_display=([^;]+)/.exec(h);
+      if (m && m[1]) return m[1];
+    }
+    return null;
+  }
+
+  test('with display cookie set by /dashboard/auth → 200 + new key visible ONCE', async () => {
+    const { token } = magicLink.createToken({
+      tenant_id: 'tenant-result',
+      key_id: issued.record.id,
+      email: 'dave@example.com',
+    });
+    const auth = await request(app).get(`/dashboard/auth?token=${encodeURIComponent(token)}`);
+    expect(auth.status).toBe(303);
+    const display = recoveryDisplayCookie(auth);
+    expect(display).toBeTruthy();
+
+    // First read: material visible
+    const first = await request(app)
+      .get('/dashboard/rotate-result')
+      .set('Cookie', `cogos_recovery_display=${display}`);
+    expect(first.status).toBe(200);
+    expect(first.text).toMatch(/Recovery complete/i);
+    expect(first.text).toMatch(/sk-cogos-[0-9a-f]{32}/);
+
+    // Second read with the same display token: nothing to show.
+    const second = await request(app)
+      .get('/dashboard/rotate-result')
+      .set('Cookie', `cogos_recovery_display=${display}`);
+    expect(second.status).toBe(200);
+    expect(second.text).not.toMatch(/sk-cogos-[0-9a-f]{32}/);
+  });
+
+  test('without display cookie → 200 + friendly "nothing to show" page', async () => {
+    const res = await request(app).get('/dashboard/rotate-result');
+    expect(res.status).toBe(200);
+    expect(res.text).toMatch(/Nothing to display/i);
+    expect(res.text).not.toMatch(/sk-cogos-[0-9a-f]{32}/);
   });
 });
 

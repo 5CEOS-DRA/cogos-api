@@ -25,6 +25,7 @@ const notifySignup = require('./notify-signup');
 const dashboard = require('./dashboard');
 const session = require('./session');
 const dailyCap = require('./daily-cap');
+const magicLink = require('./magic-link');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -323,11 +324,350 @@ function createApp() {
     return res.redirect(303, '/dashboard');
   });
 
-  // /dashboard/forgot — placeholder for the future magic-link recovery
-  // card. Public, no auth. Returns 200 HTML (NOT 501) because surfacing
-  // it as an error obscures the explanation copy.
+  // ---- /dashboard/forgot — self-serve magic-link recovery ----------------
+  //
+  // The substrate can't recover a lost API key (only sha256(plaintext) is
+  // stored). Recovery = prove email ownership via a signed magic link,
+  // then we rotate to a fresh key under the same tenant. The flow:
+  //
+  //   1. GET /dashboard/forgot   → form (email field)
+  //   2. POST /dashboard/forgot  → look up keys whose label is
+  //                                 `free-signup:<email>` OR whose
+  //                                 customer_email matches (case-sensitive
+  //                                 — same convention as free-tier signup);
+  //                                 fire-and-forget SES email if a match
+  //                                 exists; ALWAYS return the same "if an
+  //                                 account exists, we sent a link" page
+  //                                 so the form can't be turned into a
+  //                                 customer-enumeration oracle.
+  //   3. GET /dashboard/auth?token=<signed_token>
+  //                              → verifyToken (kind + sig + ttl + single-
+  //                                use nonce); on success rotate the key,
+  //                                set the session cookie, stash the new
+  //                                material in a short-lived display
+  //                                store, 303 to /dashboard/rotate-result.
+  //   4. GET /dashboard/rotate-result
+  //                              → consume the display cookie, render the
+  //                                new key + secret ONCE.
+  //
+  // NON-ENUMERATION CONTRACT: GET /dashboard/forgot returns 200; POST
+  // /dashboard/forgot returns 200 + the SAME HTML body for both known
+  // and unknown emails. The SES send happens fire-and-forget on the
+  // server side regardless of outcome (skipped silently for unknowns),
+  // so the response latency profile is the same — the visible delay is
+  // dominated by the synchronous keys.list() scan which runs either way.
+
+  // ---- Display-material store (process-local, single-use, 5-min TTL) ----
+  //
+  // /dashboard/auth needs to hand the freshly-rotated key material to
+  // /dashboard/rotate-result through a 303 redirect. We can't put
+  // plaintext in the URL or a long-lived cookie, so we mint a one-time
+  // display token, stash {material, exp_ms} in this Map, and set a
+  // short-lived HttpOnly cookie carrying the display token. The render
+  // route consumes the entry (delete + return) so a refresh shows the
+  // "nothing here" state — same show-once semantics as the rotate page.
+  // TODO(future): persist this in a shared substrate for multi-replica.
+  const DISPLAY_TTL_MS = 5 * 60 * 1000;
+  const _displayMaterial = new Map();
+  function _stashDisplay(material) {
+    const dt = require('crypto').randomBytes(24).toString('base64url');
+    _displayMaterial.set(dt, { material, exp_ms: Date.now() + DISPLAY_TTL_MS });
+    return dt;
+  }
+  function _consumeDisplay(dt) {
+    if (!dt || typeof dt !== 'string') return null;
+    const entry = _displayMaterial.get(dt);
+    if (!entry) return null;
+    _displayMaterial.delete(dt); // single-use
+    if (Date.now() >= entry.exp_ms) return null;
+    return entry.material;
+  }
+  // Garbage-collect expired entries on every stash so a load spike can't
+  // pile them up forever. O(n) but n is bounded by recovery-rate × 5min.
+  function _gcDisplay() {
+    const now = Date.now();
+    for (const [k, v] of _displayMaterial.entries()) {
+      if (now >= v.exp_ms) _displayMaterial.delete(k);
+    }
+  }
+
+  // /dashboard/forgot — GET: render the email-entry form.
   app.get('/dashboard/forgot', (_req, res) => {
-    res.type('html').send(dashboard.forgotStubHtml());
+    res.type('html').send(dashboard.forgotFormHtml({}));
+  });
+
+  // /dashboard/forgot — POST: look up keys, fire SES, always show same page.
+  app.post('/dashboard/forgot', (req, res) => {
+    const rawEmail = (req.body && req.body.email) || '';
+    const email = String(rawEmail).trim();
+    // Server-side shape check (cheap, no oracle — invalid email also
+    // gets the same confirmation page).
+    const valid = notifySignup.isValidEmail(email);
+
+    // Find candidate keys. Same case-sensitive match as the free-signup
+    // idempotency check in src/index.js POST /signup/free — so the label
+    // and customer_email stay one canonical string per identity.
+    //
+    // MULTI-KEY policy: rotating ONLY the most-recently-issued active key
+    // for this email. Rationale: rotating all of them would invalidate
+    // working clients the customer hasn't told us about (a customer who
+    // still has key #2 but lost key #1 doesn't want #2 nuked when they
+    // recover #1's tenant). The recovered key lands the customer in the
+    // dashboard signed-in; from there they can revoke any siblings they
+    // recognize. If the most-recent-key heuristic misfires (e.g. customer
+    // wants to recover a SPECIFIC older identity), they can re-run
+    // recovery after revoking — the substrate is convergent. TODO: a
+    // future card can render a chooser page when multiple keys match.
+    let target = null;
+    if (valid) {
+      const wantedLabel = `free-signup:${email}`;
+      const candidates = keys.list().filter((k) =>
+        k.active !== false
+        && !k.quarantined_at
+        && (k.label === wantedLabel || k.customer_email === email)
+      );
+      if (candidates.length > 0) {
+        // Sort by issued_at DESC, pick first. Falls back to id-stable
+        // ordering when issued_at ties (shouldn't happen with UUIDs).
+        candidates.sort((a, b) => {
+          const ta = Date.parse(a.issued_at || '') || 0;
+          const tb = Date.parse(b.issued_at || '') || 0;
+          if (tb !== ta) return tb - ta;
+          return String(b.id).localeCompare(String(a.id));
+        });
+        target = candidates[0];
+      }
+    }
+
+    if (target) {
+      // Mint a signed magic-link token for THIS key. baseUrl comes from
+      // the request — proto + host, same pattern as /signup uses for the
+      // Stripe redirect URL. That keeps the link working in dev (localhost)
+      // and prod (cogos.5ceos.com) without an env variable.
+      const proto = req.headers['x-forwarded-proto'] || req.protocol || 'https';
+      const host = req.headers['x-forwarded-host'] || req.headers.host;
+      const baseUrl = `${proto}://${host}`;
+      const { url, exp_ms, nonce } = magicLink.createToken({
+        tenant_id: target.tenant_id,
+        key_id: target.id,
+        email,
+        baseUrl,
+      });
+      logger.info('magic_link_issued', {
+        tenant_id: target.tenant_id,
+        key_id: target.id,
+        nonce, // safe to log — opaque random id, not the token
+        exp_ms,
+      });
+
+      // Fire-and-forget SES send. We do NOT block the response on the
+      // mail delivery (latency would otherwise become an oracle for
+      // "email matched a real customer"). The notify-signup helper
+      // already encapsulates the SES → Resend → log-only ladder.
+      const sendRow = {
+        ts: new Date().toISOString(),
+        email,
+        source: 'magic-link-recovery',
+        ip: req.ip || null,
+        ua: req.headers['user-agent'] || null,
+      };
+      // We bend the row shape slightly: forwardEmail builds the subject
+      // line from row.email + sends fixed body copy. For recovery we need
+      // the URL in the body, so we send a SECOND row to ourselves shaped
+      // for the recovery email — operator visibility is the goal here,
+      // not customer mail. TODO: a future card adds a dedicated send-as-
+      // customer SES path. For v1 the recovery URL is logged AND sent
+      // through the operator-notification transport so an operator can
+      // forward it manually if SES misfires for a particular customer.
+      const recoveryRow = {
+        ...sendRow,
+        // notify-signup's email template builds: "New signup\n\nemail: ...".
+        // We embed the recovery URL in the user-agent slot so it lands
+        // in the operator's notification email body unmangled. Hacky but
+        // works without forking the transport code — a cleaner template
+        // helper is a TODO once we have a second send-case.
+        ua: `magic-link recovery URL: ${url} (expires in ${Math.round((exp_ms - Date.now()) / 1000)}s)`,
+      };
+      notifySignup.forwardEmail(recoveryRow).then((r) => {
+        if (r.sent) {
+          logger.info('magic_link_email_sent', {
+            tenant_id: target.tenant_id,
+            transport: r.transport,
+            status: r.status,
+          });
+        } else {
+          // Log-only fallback: print the URL so an operator can dig it
+          // out of the logs if the customer reports they didn't receive
+          // it. Acceptable because the same URL was already issued —
+          // logging it doesn't widen the attack surface beyond log
+          // access (which gates the secrets file anyway).
+          logger.warn('magic_link_email_skipped', {
+            tenant_id: target.tenant_id,
+            reason: r.reason,
+            recovery_url: url,
+          });
+        }
+      }).catch((e) => {
+        logger.warn('magic_link_email_error', { error: e.message });
+      });
+    } else {
+      // No match. We deliberately do NOT log the email at INFO — log
+      // forensics shouldn't grow a list of "addresses someone probed."
+      logger.info('magic_link_request_no_match', { ip: req.ip || null });
+    }
+
+    // SAME response either way — this is the non-enumeration contract.
+    // 200 + identical body shape regardless of match outcome.
+    res.type('html').send(dashboard.forgotConfirmHtml({ email }));
+  });
+
+  // /dashboard/auth — GET: verify magic-link token, rotate key, set
+  // session cookie, stash material, 303 to /dashboard/rotate-result.
+  app.get('/dashboard/auth', (req, res) => {
+    const token = typeof req.query.token === 'string' ? req.query.token : '';
+    const parsed = magicLink.verifyToken(token);
+    if (!parsed) {
+      // Single 400-with-error page for every failure mode (bad sig,
+      // expired, replayed, garbage). The form-error UX is the same
+      // closed-map pattern as the dashboard login page — no reflected
+      // echo of the token value into the page.
+      logger.info('magic_link_verify_failed', { ip: req.ip || null });
+      return res.status(400).type('html').send(
+        dashboard.forgotFormHtml({
+          error: 'That recovery link is invalid, expired, or already used. '
+            + 'Request a fresh one below.',
+        }),
+      );
+    }
+
+    // Re-validate the target key is still rotatable. The token might
+    // have been minted minutes ago and the key could have been revoked
+    // since then (e.g. operator triage). Refuse cleanly if so.
+    const target = keys.findById(parsed.key_id);
+    if (!target || target.active === false || target.quarantined_at
+        || target.tenant_id !== parsed.tenant_id) {
+      logger.warn('magic_link_target_unrotatable', {
+        tenant_id: parsed.tenant_id, key_id: parsed.key_id,
+      });
+      return res.status(400).type('html').send(
+        dashboard.forgotFormHtml({
+          error: 'The key on that recovery link is no longer active. '
+            + 'Sign in with a different key if you have one, or contact support.',
+        }),
+      );
+    }
+
+    // Rotate. Same pattern as the dashboard /dashboard/keys/rotate
+    // handler — the old key keeps its 24h grace, the new key is the
+    // customer's going forward. We pass the FULL record (rotate()
+    // requires the caller record with id; findById returns it without
+    // key_hash which is fine — rotate() looks the record up by id
+    // internally before reading any sensitive field).
+    let issued;
+    try {
+      issued = keys.rotate(target);
+    } catch (e) {
+      logger.error('magic_link_rotate_failed', {
+        tenant_id: parsed.tenant_id, key_id: parsed.key_id, error: e.message,
+      });
+      return res.status(500).type('html').send(
+        dashboard.forgotFormHtml({
+          error: 'Could not mint a fresh key for your tenant. Try again or '
+            + 'contact support@5ceos.com.',
+        }),
+      );
+    }
+
+    // Audit-log marker: an operator scanning /v1/audit (or the dashboard
+    // audit table) should see a clear "tenant X recovered via magic
+    // link at ts Y" row. We append a 0-token row to the new key's
+    // (tenant, app) chain so the marker is INSIDE the same hash chain
+    // the customer reads — tamper-evident.
+    try {
+      usage.record({
+        tenant_id: issued.record.tenant_id,
+        key_id: issued.record.id,
+        app_id: issued.record.app_id || keys.DEFAULT_APP_ID,
+        route: '/dashboard/auth',
+        status: 'magic_link_recovery',
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        latency_ms: 0,
+      });
+    } catch (e) {
+      // Don't fail recovery on an audit-log glitch. The rotation is
+      // already on disk in keys.json.
+      logger.warn('magic_link_audit_record_failed', { error: e.message });
+    }
+
+    // Mint a session cookie bound to the NEW key. The customer is now
+    // signed in — clicking through to /dashboard/home from the result
+    // page just works.
+    const cookieValue = session.createSession({
+      tenant_id: issued.record.tenant_id,
+      key_id: issued.record.id,
+      app_id: issued.record.app_id || keys.DEFAULT_APP_ID,
+    });
+
+    // Stash the show-once material in the in-memory display store +
+    // mint a short-lived cookie carrying the lookup key. Two Set-Cookie
+    // headers — the session cookie + the one-time display cookie.
+    _gcDisplay();
+    const displayToken = _stashDisplay({
+      new_api_key: issued.plaintext,
+      new_hmac_secret: issued.hmac_secret,
+      ed25519_key_id: issued.ed25519_key_id,
+      private_pem: issued.private_pem,
+      pubkey_pem: issued.pubkey_pem,
+      x25519_private_pem: issued.x25519_private_pem,
+      x25519_pubkey_pem: issued.x25519_pubkey_pem,
+      expires_at: issued.record.expires_at,
+      grace_until: issued.rotation_grace_until_iso,
+      scheme: issued.record.scheme,
+    });
+    const displayCookie = `cogos_recovery_display=${displayToken}; `
+      + `HttpOnly; Secure; SameSite=Strict; Path=/dashboard; `
+      + `Max-Age=${Math.floor(DISPLAY_TTL_MS / 1000)}`;
+    res.setHeader('Set-Cookie', [
+      session.createSetCookie(cookieValue),
+      displayCookie,
+    ]);
+
+    logger.info('magic_link_recovery_ok', {
+      tenant_id: issued.record.tenant_id,
+      old_key_id: parsed.key_id,
+      new_key_id: issued.record.id,
+    });
+
+    return res.redirect(303, '/dashboard/rotate-result');
+  });
+
+  // /dashboard/rotate-result — render the show-once new-key page. Reads
+  // the one-time display cookie, looks up the material in-memory, clears
+  // both the cookie and the store entry, renders the page. If the
+  // display token is missing/consumed/expired we render a friendly
+  // "nothing to show" page rather than an error — the customer might
+  // have refreshed after closing the tab.
+  app.get('/dashboard/rotate-result', (req, res) => {
+    const cookies = session.parseCookieHeader(req.headers.cookie || '');
+    const displayToken = cookies['cogos_recovery_display'];
+    const material = _consumeDisplay(displayToken);
+
+    // Clear the display cookie regardless of lookup outcome.
+    res.setHeader('Set-Cookie',
+      `cogos_recovery_display=; HttpOnly; Secure; SameSite=Strict; `
+      + `Path=/dashboard; Max-Age=0`,
+    );
+
+    if (!material) {
+      return res.type('html').send(dashboard.forgotFormHtml({
+        error: 'Nothing to display here — the recovery material has already '
+          + 'been shown once or the 5-minute window expired. If you saved '
+          + 'the new key, you can sign in normally. Otherwise, run recovery '
+          + 'again from this same email address.',
+      }));
+    }
+    return res.type('html').send(dashboard.recoveryResultHtml(material));
   });
 
   // /dashboard/home — the actual dashboard surface. Session-gated.

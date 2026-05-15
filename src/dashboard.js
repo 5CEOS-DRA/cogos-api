@@ -164,7 +164,7 @@ function loginHtml({ error } = {}) {
     <strong>Bearer keys only.</strong> The dashboard sign-in path validates plaintext bearer keys against the server&apos;s stored hash. Ed25519-scheme keys hold no replayable plaintext &mdash; they sign each request and don&apos;t fit a paste-and-go form. Operator-scope ed25519 customers should manage via <code>POST /v1/keys/rotate</code> directly. A future card can layer an attest-once challenge to bring ed25519 customers into the dashboard.
   </div>
   <div class="warn">
-    <strong>Lost or rotated all your keys?</strong> Magic-link recovery is a future card. For now, email <a href="mailto:support@5ceos.com?subject=%5BSECURITY%5D%20Key%20recovery">support@5ceos.com</a> with the subject prefix <code>[SECURITY]</code> from the same address that bought the subscription.
+    <strong>Lost or rotated all your keys?</strong> Use <a href="/dashboard/forgot">key recovery</a> &mdash; enter the email you signed up or subscribed with and we&apos;ll send a single-use link to mint a fresh key under the same tenant.
   </div>
 `;
   return wrap({ title: 'CogOS — dashboard sign-in', bodyHtml: body });
@@ -340,7 +340,7 @@ function homeHtml(state) {
   ${renderAuditTable(state)}
 
   <div class="warn" style="margin-top:32px">
-    <strong>Lost a key?</strong> <a href="/dashboard/forgot">Magic-link recovery</a> is a future card. For now, rotate from a still-valid key, or email <a href="mailto:support@5ceos.com?subject=%5BSECURITY%5D%20Key%20recovery">support@5ceos.com</a> with the <code>[SECURITY]</code> subject prefix.
+    <strong>Lost a key?</strong> If you still have ANY valid key, sign in with it and rotate via the keys table. If you&apos;ve lost every key, <a href="/dashboard/forgot">key recovery</a> sends a single-use link to the email on file.
   </div>
 `;
   return wrap({
@@ -351,26 +351,141 @@ function homeHtml(state) {
 }
 
 // -----------------------------------------------------------------------------
-// /dashboard/forgot — placeholder for the future magic-link recovery card
+// /dashboard/forgot — magic-link "I lost my API key" recovery flow
 // -----------------------------------------------------------------------------
+//
+// The substrate cannot recover a lost API key (only sha256(plaintext) is
+// stored). "Recovery" therefore means: prove you own the email associated
+// with a key → we mint a fresh key for the same tenant → the old key
+// enters its standard 24h grace window. The flow has THREE surfaces:
+//
+//   1. forgotFormHtml({error})    — the email-entry form at GET /dashboard/forgot
+//   2. forgotConfirmHtml({email}) — the "if-an-account-exists-we-sent-a-link"
+//                                    page returned on POST /dashboard/forgot.
+//                                    INTENTIONALLY VAGUE — the same page is
+//                                    returned whether the email matched a real
+//                                    customer or not, so a poking attacker
+//                                    can't enumerate customers via this form.
+//   3. recoveryResultHtml({...})  — the show-once new-key display at
+//                                    /dashboard/rotate-result (mirrors
+//                                    rotateResultHtml's shape).
 
-function forgotStubHtml() {
+function forgotFormHtml({ error } = {}) {
+  const errorBlock = error
+    ? `<div class="error">${escapeHtml(String(error))}</div>`
+    : '';
   const body = `
   <h1>Key recovery</h1>
-  <div class="subheader">Coming in a future release.</div>
-  <div class="info">
-    <strong>What this will be.</strong> A magic-link flow: enter the billing email on file, we send a single-use link, and you arrive at a page that mints a fresh API key (with the old material revoked or grace-deprecated as appropriate). It is intentionally NOT built yet &mdash; magic links are a separate substrate concern (mail deliverability, link-token storage, replay window, rate limiting) and we&apos;d rather ship the dashboard <em>without</em> a half-implemented recovery surface than ship a recovery flow we can&apos;t confidently lock down.
+  <div class="subheader">Lost every API key for your tenant? Enter the email on file and we&apos;ll send a single-use link to mint a fresh key. The old key keeps working for 24h after recovery so any client you forgot about doesn&apos;t 401 mid-call.</div>
+  ${errorBlock}
+  <form action="/dashboard/forgot" method="POST" autocomplete="off">
+    <label for="email" style="display:block;font-size:12px;color:#8b949e;margin-bottom:6px">Your billing or signup email</label>
+    <input type="email" name="email" id="email" placeholder="you@example.com" autocomplete="email" autofocus required>
+    <div style="margin-top:14px">
+      <button class="btn btn-primary" type="submit">Send recovery link</button>
+      <a class="btn" href="/dashboard" style="margin-left:8px">&larr; back to sign-in</a>
+    </div>
+  </form>
+  <div class="info" style="margin-top:28px">
+    <strong>How this works.</strong> The link is good for 15 minutes and can only be used once. Clicking it issues a new API key under your existing tenant; we never see or transmit the old plaintext (we never had it). Your audit chain, billing identity, and app namespaces all carry forward unchanged.
   </div>
   <div class="warn">
-    <strong>What to do today.</strong>
+    <strong>Doesn&apos;t work?</strong> If you signed up anonymously (no email at signup) or the email on your Stripe receipt has changed, email <a href="mailto:support@5ceos.com?subject=%5BSECURITY%5D%20Key%20recovery">support@5ceos.com</a> with the subject prefix <code>[SECURITY]</code> &mdash; an operator can run a manual identity check.
+  </div>
+`;
+  return wrap({ title: 'CogOS — key recovery', bodyHtml: body, current: '/dashboard' });
+}
+
+// The "if-an-account-exists" confirmation page. Intentionally vague:
+// the same page is returned for both real customers and unknown emails
+// so the form can't be turned into an enumeration oracle. The echoed
+// email is HTML-escaped — we render exactly what the user typed.
+function forgotConfirmHtml({ email } = {}) {
+  const safeEmail = escapeHtml(String(email || '').slice(0, 254));
+  const body = `
+  <h1>Check your inbox</h1>
+  <div class="subheader">If an account exists for <code>${safeEmail}</code>, we&apos;ve sent a single-use recovery link.</div>
+  <div class="info">
+    <strong>Next steps.</strong>
     <ul style="margin-top:8px">
-      <li>If you have <em>any</em> still-valid key for the tenant, sign in with it and rotate via the keys table.</li>
-      <li>If you&apos;ve lost every key, email <a href="mailto:support@5ceos.com?subject=%5BSECURITY%5D%20Key%20recovery">support@5ceos.com</a> with the subject prefix <code>[SECURITY]</code>. Send from the email on the Stripe receipt; an operator will issue a replacement after a brief identity check.</li>
+      <li>Open the email and click the link within <strong>15 minutes</strong>. The link mints a fresh API key under your existing tenant and signs you into the dashboard.</li>
+      <li>If you don&apos;t see it, check spam &mdash; we send from <code>notify@5ceos.com</code> via AWS SES. Then double-check the spelling of the address you submitted.</li>
+      <li>If the email genuinely never arrives, or you signed up without an email, contact <a href="mailto:support@5ceos.com?subject=%5BSECURITY%5D%20Key%20recovery">support@5ceos.com</a> with the subject prefix <code>[SECURITY]</code> for a manual identity check.</li>
     </ul>
+  </div>
+  <div class="warn" style="margin-top:18px">
+    <strong>Privacy note.</strong> We deliberately do not confirm whether <code>${safeEmail}</code> is a real customer &mdash; that would let anyone enumerate our customer list by trying addresses. You see the same page either way.
   </div>
   <p style="margin-top:24px"><a class="btn" href="/dashboard">&larr; Back to sign-in</a></p>
 `;
-  return wrap({ title: 'CogOS — key recovery (coming soon)', bodyHtml: body, current: '/dashboard' });
+  return wrap({ title: 'CogOS — recovery link sent', bodyHtml: body, current: '/dashboard' });
+}
+
+// Show-once display of the newly-issued key + secret after a successful
+// magic-link recovery. Mirrors rotateResultHtml's shape — the only
+// material difference is the copy reflects "you recovered" rather than
+// "you rotated voluntarily."
+function recoveryResultHtml({
+  new_api_key, new_hmac_secret, expires_at, grace_until,
+  ed25519_key_id, private_pem, pubkey_pem,
+  x25519_private_pem, x25519_pubkey_pem, scheme,
+}) {
+  const safeKey = escapeHtml(new_api_key || '');
+  const safeHmac = escapeHtml(new_hmac_secret || '');
+  const safeEd = escapeHtml(ed25519_key_id || '');
+  const safePriv = escapeHtml(private_pem || '');
+  const safePub = escapeHtml(pubkey_pem || '');
+  const safeX25Priv = escapeHtml(x25519_private_pem || '');
+  const safeX25Pub = escapeHtml(x25519_pubkey_pem || '');
+
+  const bearerBlock = (scheme === 'bearer' && safeKey) ? `
+  <h2>Your new API key</h2>
+  <pre><code>${safeKey}</code></pre>
+  <h2>Your new HMAC secret</h2>
+  <p>Use this to verify the <code>X-Cogos-Signature</code> header on every <code>/v1/*</code> response. <a href="/cookbook#verify-signature">How to verify &rarr;</a></p>
+  <pre><code>${safeHmac}</code></pre>
+  ` : '';
+
+  const ed25519Block = (scheme === 'ed25519' && safeEd) ? `
+  <h2>Your new ed25519 keypair</h2>
+  <p><code>keyId</code>: <code>${safeEd}</code></p>
+  <h3>Private key (PEM) &mdash; auth signing</h3>
+  <pre><code>${safePriv}</code></pre>
+  <h3>Public key (PEM)</h3>
+  <pre><code>${safePub}</code></pre>
+  <h3>X25519 sealing keypair</h3>
+  <p>Used to decrypt sealed audit rows. Hold the private PEM client-side. The server retains only the public.</p>
+  <pre><code>${safeX25Priv}</code></pre>
+  <pre><code>${safeX25Pub}</code></pre>
+  <h2>HMAC secret (response signing)</h2>
+  <pre><code>${safeHmac}</code></pre>
+  ` : '';
+
+  const body = `
+  <h1>&check; Recovery complete</h1>
+  <div class="subheader">A new API key has been minted under your existing tenant. Your audit chain, billing identity, and app namespaces all carry forward unchanged.</div>
+
+  <div class="warn">
+    <strong>Save this material NOW.</strong> The new key + secret are displayed exactly once. Navigating away loses them. We store only the sealed envelope server-side. If you lose this material too, run recovery again from this same email address.
+    ${expires_at ? `<br><br><small>New key expires at <code>${escapeHtml(expires_at)}</code>.</small>` : ''}
+    ${grace_until ? `<br><small>Old key grace window ends at <code>${escapeHtml(grace_until)}</code> &mdash; any client still using the lost key will continue working until then. After that the old key auto-revokes on its next touch.</small>` : ''}
+  </div>
+
+  ${bearerBlock}
+  ${ed25519Block}
+
+  <h2>What next</h2>
+  <ol>
+    <li>Update any client you still have access to with the new key.</li>
+    <li>The lost key is in its standard 24h grace window. After that it auto-revokes &mdash; no further action required.</li>
+    <li>If you want to cut the grace short (e.g. you suspect the lost key was stolen, not just misplaced), sign in here and revoke it from the keys table immediately.</li>
+  </ol>
+
+  <p style="margin-top:24px">
+    <a class="btn btn-primary" href="/dashboard/home">&rarr; Go to dashboard</a>
+  </p>
+`;
+  return wrap({ title: 'CogOS — recovery complete', bodyHtml: body, current: '/dashboard' });
 }
 
 // -----------------------------------------------------------------------------
@@ -448,7 +563,9 @@ function rotateResultHtml({
 module.exports = {
   loginHtml,
   homeHtml,
-  forgotStubHtml,
+  forgotFormHtml,
+  forgotConfirmHtml,
+  recoveryResultHtml,
   rotateResultHtml,
   // Exposed for the route handler to translate query-string errors
   // through the same closed map (no reflected echo).

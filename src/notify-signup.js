@@ -315,5 +315,10 @@ module.exports = {
   handleSignup,
   list,
   isValidEmail,
+  // Exported so src/index.js (magic-link recovery) can reuse the same
+  // SES → Resend → log-only transport ladder without duplicating the
+  // SigV4-signing code. Behavior unchanged; see the function comment
+  // above for the priority order.
+  forwardEmail,
   _internal: { record, thankPage },
 };

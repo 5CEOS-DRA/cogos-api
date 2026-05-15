@@ -497,7 +497,7 @@ follow a link.</p>
   <li><strong>Network segmentation:</strong> the inference engine has internal-only ingress; it is not reachable from the public internet.</li>
   <li><strong>Secrets storage:</strong> administrative credentials are stored in Azure Container Apps secrets and are not exposed in environment variables visible to non-privileged personnel or in source code.</li>
   <li><strong>Vendor exclusion:</strong> Customer prompts and Outputs are not transmitted to any third-party language-model API provider (OpenAI, Anthropic, Google, Cohere, Mistral, Fireworks, Together, DeepInfra, Modal, Replicate, Groq, or similar). The inference engine is deployed as a sibling container within the same managed environment as the gateway.</li>
-  <li><strong>Audit engagement:</strong> ${COMPANY_DISPLAY_NAME} has engaged for a SOC 2 Type II audit; report expected [TBD — completion date]. Until the report is published, ${COMPANY_DISPLAY_NAME} will provide a written security attestation to Customers with executed DPAs on request.</li>
+  <li><strong>Audit engagement:</strong> ${COMPANY_DISPLAY_NAME} has a SOC 2 Type II audit engagement pending. Until the report is published, ${COMPANY_DISPLAY_NAME} will provide a written security attestation to Customers with executed DPAs on request.</li>
 </ul>
 
 <h2>5. Data Location</h2>

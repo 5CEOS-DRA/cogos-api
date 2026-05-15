@@ -16,3 +16,6 @@ coverage/
 cosign.key
 cosign.pub
 cosign.password
+# Backups produced by scripts/cosign-regenerate.sh are encrypted with the
+# old password but still sensitive — never commit.
+cosign.key.bak.*

@@ -27,6 +27,22 @@ function checkLifecycle(record, res) {
       };
     }
   }
+  // Quarantined? Operator-resumable; the customer can't unfreeze
+  // themselves on this path. Distinct type so the SDK can surface a
+  // specific message instead of a generic "your key is dead." Checked
+  // before the rotation-grace branch so a quarantined key in grace
+  // still fails closed.
+  if (record && record.quarantined_at) {
+    return {
+      status: 401,
+      body: {
+        error: {
+          message: 'API key is quarantined for review. Contact support@5ceos.com.',
+          type: 'key_quarantined_for_review',
+        },
+      },
+    };
+  }
   // Rotation grace: auth succeeds, but the response carries a
   // deprecation header pointing at the new key's deadline. SDKs read
   // this to schedule a switchover. We don't expose the parent key id

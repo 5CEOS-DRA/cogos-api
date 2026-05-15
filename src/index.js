@@ -651,6 +651,37 @@ function createApp() {
     res.json({ revoked: true, key_id: req.params.id });
   });
 
+  // ---- Admin: quarantine surfaces (lifecycle card commit 3/3) ----
+  //
+  // List every key currently held in quarantine. Returned shape mirrors
+  // /admin/keys listing so the operator dashboard can reuse the same
+  // table component. Includes quarantine_reason for triage.
+  app.get('/admin/keys/quarantined', adminAuth, (_req, res) => {
+    res.json({ keys: keys.listQuarantined() });
+  });
+
+  // Clear quarantine. The operator decides the key is safe to return to
+  // production. clearQuarantine() appends to quarantine_history so the
+  // audit trail survives. 404 if no matching key; 409 if not currently
+  // quarantined (caller would otherwise believe they cleared something
+  // they didn't).
+  app.post('/admin/keys/:id/clear-quarantine', adminAuth, (req, res) => {
+    const id = req.params.id;
+    const found = keys.findById(id);
+    if (!found) return res.status(404).json({ error: { message: 'Key not found' } });
+    if (!found.quarantined_at) {
+      return res.status(409).json({
+        error: { message: 'Key is not currently quarantined' },
+      });
+    }
+    const ok = keys.clearQuarantine(id);
+    if (!ok) {
+      return res.status(500).json({ error: { message: 'clearQuarantine failed unexpectedly' } });
+    }
+    logger.info('key_quarantine_cleared', { id });
+    res.json({ cleared: true, key_id: id });
+  });
+
   // Usage log — supports `?since=<unix-ms>` for tailing.
   app.get('/admin/usage', adminAuth, (req, res) => {
     const sinceMs = Number(req.query.since || 0);

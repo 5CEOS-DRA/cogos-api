@@ -230,6 +230,13 @@ function issue({
     // the response carries X-Cogos-Key-Deprecated. After grace,
     // verify() auto-revokes on next touch.
     rotation_grace_until: null,
+    // quarantined_at — ms-epoch; non-null = key is held for review.
+    // Auth path rejects with `key_quarantined_for_review`. Cleared by
+    // operator via /admin/keys/:id/clear-quarantine. Trigger is
+    // anomaly-driven (scanner_active + recent valid auth from same IP
+    // within 60s, fail-closed mode only).
+    quarantined_at: null,
+    quarantine_reason: null,
   };
   const records = readAll();
   records.push(record);
@@ -516,12 +523,82 @@ function rotate(callerRecord) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Quarantine (2026-05-15 — key lifecycle card, commit 3/3).
+// ---------------------------------------------------------------------------
+//
+// Quarantine a key. Idempotent — calling on an already-quarantined key
+// is a no-op (preserves the original quarantine timestamp + reason).
+// Quarantine is fail-closed: auth.js returns 401
+// `key_quarantined_for_review` until the operator clears it explicitly.
+function quarantine(id, reason) {
+  if (!id) return false;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return false;
+  if (r.quarantined_at) return true; // already quarantined; no rewrite
+  r.quarantined_at = Date.now();
+  r.quarantine_reason = String(reason || 'unspecified');
+  writeAll(records);
+  return true;
+}
+
+// Operator-driven clear. Reverse of quarantine(). Preserves the original
+// quarantine timestamp+reason as quarantine_history so a key bouncing
+// in/out of quarantine leaves a trail (that itself is a signal).
+function clearQuarantine(id) {
+  if (!id) return false;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return false;
+  if (!r.quarantined_at) return false; // nothing to clear
+  if (!Array.isArray(r.quarantine_history)) r.quarantine_history = [];
+  r.quarantine_history.push({
+    quarantined_at: r.quarantined_at,
+    quarantine_reason: r.quarantine_reason || null,
+    cleared_at: Date.now(),
+  });
+  r.quarantined_at = null;
+  r.quarantine_reason = null;
+  writeAll(records);
+  return true;
+}
+
+// Return every record currently quarantined. Operator visibility surface
+// for /admin/keys/quarantined.
+function listQuarantined() {
+  return readAll()
+    .filter((r) => r.quarantined_at)
+    .map((r) => {
+      const out = { ...r, key_hash: undefined };
+      if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+      return out;
+    });
+}
+
+// Internal lookup used by the admin clear-quarantine route to disambig-
+// uate 404 (no such key) from 409 (key exists but isn't quarantined).
+// Returns the record sans key_hash, or null.
+function findById(id) {
+  if (!id) return null;
+  const records = readAll();
+  const r = records.find((x) => x.id === id);
+  if (!r) return null;
+  const out = { ...r, key_hash: undefined };
+  if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  return out;
+}
+
 module.exports = {
   issue,
   verify,
   list,
   revoke,
   rotate,
+  quarantine,
+  clearQuarantine,
+  listQuarantined,
+  findById,
   findByStripeCustomer,
   updateStripeStatus,
   findByEd25519KeyId,

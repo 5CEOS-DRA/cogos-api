@@ -216,3 +216,137 @@ describe('key lifecycle — rotation', () => {
     expect(rot.body.hmac_secret.length).toBeGreaterThan(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Quarantine — anomaly-driven (scanner_active + recent valid auth combo)
+// ---------------------------------------------------------------------------
+describe('key lifecycle — quarantine', () => {
+  test('scanner_active + recent valid auth from same IP (fail-closed) quarantines the key', async () => {
+    process.env.ANOMALY_FAIL_CLOSED = '1';
+    process.env.RATE_LIMIT_IP_PER_MIN = '200';
+    try {
+      jest.resetModules();
+      const anom = require('../src/anomaly');
+      const keys = require('../src/keys');
+      const { createApp } = require('../src/index');
+      const app = createApp();
+      anom._test.reset();
+
+      // Issue a key so we have something to quarantine.
+      const issue = await request(app)
+        .post('/admin/keys')
+        .set('X-Admin-Key', process.env.ADMIN_KEY)
+        .send({ tenant_id: 'tenant-q1' });
+      expect(issue.status).toBe(201);
+
+      // Record a recent successful auth from 127.0.0.1 directly (the
+      // observer would do this on a real request; we drive it here so
+      // the test is independent of supertest's IP normalization).
+      anom._test.recordRecentAuth('127.0.0.1', issue.body.key_id);
+      anom._test.recordRecentAuth('::ffff:127.0.0.1', issue.body.key_id);
+
+      // 4 honeypot hits → threshold (3) crossed → scanner_active fires.
+      // In fail-closed mode the fire path peeks the recent-auth map and
+      // quarantines the recorded key.
+      await request(app).get('/.env');
+      await request(app).get('/wp-admin');
+      await request(app).get('/.git/config');
+      await request(app).get('/xmlrpc.php');
+
+      // The key should now be quarantined on disk.
+      const after = keys.findById(issue.body.key_id);
+      expect(after.quarantined_at).toEqual(expect.any(Number));
+      expect(after.quarantine_reason).toBe('scanner_active+valid_auth');
+    } finally {
+      delete process.env.ANOMALY_FAIL_CLOSED;
+      delete process.env.RATE_LIMIT_IP_PER_MIN;
+    }
+  });
+
+  test('quarantined key auth → 401 key_quarantined_for_review', async () => {
+    const app = freshApp();
+    const issue = await issueKey(app, { tenant_id: 'tenant-q2' });
+
+    // Quarantine directly via the keys module — the anomaly trigger path
+    // is covered by the test above; here we just verify auth fails the
+    // right way once the field is set.
+    jest.resetModules();
+    const keys = require('../src/keys');
+    expect(keys.quarantine(issue.body.key_id, 'manual_test')).toBe(true);
+
+    // New app instance loads the updated record from disk.
+    const { createApp } = require('../src/index');
+    const app2 = createApp();
+    const r = await request(app2)
+      .get('/v1/models')
+      .set('Authorization', `Bearer ${issue.body.api_key}`);
+    expect(r.status).toBe(401);
+    expect(r.body.error.type).toBe('key_quarantined_for_review');
+  });
+
+  test('operator clear-quarantine → next auth succeeds', async () => {
+    const app = freshApp();
+    const issue = await issueKey(app, { tenant_id: 'tenant-q3' });
+    jest.resetModules();
+    const keys = require('../src/keys');
+    keys.quarantine(issue.body.key_id, 'manual_test');
+
+    const { createApp } = require('../src/index');
+    const app2 = createApp();
+    // First confirm 401 quarantined.
+    const r1 = await request(app2)
+      .get('/v1/models')
+      .set('Authorization', `Bearer ${issue.body.api_key}`);
+    expect(r1.status).toBe(401);
+    expect(r1.body.error.type).toBe('key_quarantined_for_review');
+
+    // Operator clears.
+    const clr = await request(app2)
+      .post(`/admin/keys/${issue.body.key_id}/clear-quarantine`)
+      .set('X-Admin-Key', process.env.ADMIN_KEY);
+    expect(clr.status).toBe(200);
+    expect(clr.body.cleared).toBe(true);
+
+    // Next auth succeeds (no 401 from lifecycle gate).
+    const r2 = await request(app2)
+      .get('/v1/models')
+      .set('Authorization', `Bearer ${issue.body.api_key}`);
+    expect(r2.status).not.toBe(401);
+  });
+
+  test('clear-quarantine on a non-quarantined key → 409', async () => {
+    const app = freshApp();
+    const issue = await issueKey(app, { tenant_id: 'tenant-q4' });
+    const r = await request(app)
+      .post(`/admin/keys/${issue.body.key_id}/clear-quarantine`)
+      .set('X-Admin-Key', process.env.ADMIN_KEY);
+    expect(r.status).toBe(409);
+  });
+
+  test('clear-quarantine on unknown id → 404', async () => {
+    const app = freshApp();
+    const r = await request(app)
+      .post('/admin/keys/no-such-id/clear-quarantine')
+      .set('X-Admin-Key', process.env.ADMIN_KEY);
+    expect(r.status).toBe(404);
+  });
+
+  test('GET /admin/keys/quarantined lists ONLY quarantined records', async () => {
+    const app = freshApp();
+    const a = await issueKey(app, { tenant_id: 'tenant-q5a' });
+    const b = await issueKey(app, { tenant_id: 'tenant-q5b' });
+    jest.resetModules();
+    const keys = require('../src/keys');
+    keys.quarantine(a.body.key_id, 'test');
+
+    const { createApp } = require('../src/index');
+    const app2 = createApp();
+    const r = await request(app2)
+      .get('/admin/keys/quarantined')
+      .set('X-Admin-Key', process.env.ADMIN_KEY);
+    expect(r.status).toBe(200);
+    expect(Array.isArray(r.body.keys)).toBe(true);
+    expect(r.body.keys.map((k) => k.id)).toEqual([a.body.key_id]);
+    expect(r.body.keys.map((k) => k.id)).not.toContain(b.body.key_id);
+  });
+});

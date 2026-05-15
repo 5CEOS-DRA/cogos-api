@@ -907,7 +907,7 @@ verifiable in <a href="/SECURITY.md">SECURITY.md §3</a>:</p>
   <li>Pseudonymisation and encryption of personal data, where appropriate (TLS 1.2+ in transit; API keys stored as SHA-256 hashes);</li>
   <li>Ability to ensure the ongoing confidentiality, integrity, availability, and resilience of processing systems (response signature HMAC, append-only audit log, cosign-signed deployments, internal-only ingress for the inference engine);</li>
   <li>Ability to restore the availability and access to personal data in a timely manner in the event of a physical or technical incident (Azure platform redundancy + Processor's documented incident response);</li>
-  <li>A process for regularly testing, assessing, and evaluating the effectiveness of technical and organisational measures (open determinism bench published at <code>github.com/5CEOS-DRA/llm-determinism-bench</code>; SOC 2 Type II audit engaged, report expected [TBD]).</li>
+  <li>A process for regularly testing, assessing, and evaluating the effectiveness of technical and organisational measures (open determinism bench published at <code>github.com/5CEOS-DRA/llm-determinism-bench</code>; SOC 2 Type II audit engagement pending).</li>
 </ul>
 
 <h3>(d) Sub-processor Restrictions</h3>

@@ -178,6 +178,15 @@ function renderLandingHtml(packages = []) {
     <a href="/demo" style="color:#3fb950;font-weight:600">Open the demo &rarr;</a>
   </div>
 
+  <div style="background:#0d2818;border:1px solid #3fb950;border-left:3px solid #3fb950;color:#c9d1d9;padding:14px 18px;border-radius:6px;font-size:13px;margin-bottom:14px">
+    <strong style="color:#3fb950">Stay informed.</strong>
+    Drop your email and we&apos;ll ping you when there&apos;s news worth your attention &mdash; new tier, new substrate primitive, customer milestone, breaking benchmark result. No spam, no upsells, no third-party trackers.
+    <form action="/notify-signup" method="POST" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-top:10px">
+      <input type="email" name="email" required placeholder="your@email.com" autocomplete="email" style="flex:1 1 220px;min-width:200px;background:#0a0e14;color:#c9d1d9;border:1px solid #30363d;padding:8px 12px;border-radius:4px;font-family:inherit;font-size:13px">
+      <button type="submit" style="background:#238636;color:#fff;border:0;padding:9px 18px;border-radius:4px;cursor:pointer;font-family:inherit;font-size:13px;font-weight:600">Notify me</button>
+    </form>
+  </div>
+
   <div style="background:#3d2f0a;border:1px solid #d29922;border-left:3px solid #d29922;color:#f2cc60;padding:10px 14px;border-radius:6px;font-size:12.5px;margin-bottom:14px">
     <strong style="color:#d29922">Or browse the cookbook.</strong>
     Six archetypal patterns &mdash; extraction, classification, routing, scoring, agent step, multi-extract. <a href="/cookbook" style="color:#79c0ff">Copy-paste recipes &rarr;</a>

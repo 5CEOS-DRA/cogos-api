@@ -21,6 +21,7 @@ const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
 const { rateLimitByIp, rateLimitByTenant } = require('./rate-limit');
 const soc2 = require('./soc2');
+const notifySignup = require('./notify-signup');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -147,6 +148,9 @@ function createApp() {
     limit: '512kb',
     verify: (req, _res, buf) => { req.rawBody = buf; },
   }));
+  // Form-urlencoded parser for the notify-signup form on the landing page.
+  // Cap is tight — only one short email field is expected.
+  app.use(express.urlencoded({ extended: false, limit: '4kb' }));
   app.set('trust proxy', 1);
 
   // ---- Public health (no auth) ----
@@ -238,6 +242,16 @@ function createApp() {
     // probe could flip this to 'degraded' on partial-failure signals.
     const state = trust.buildTrustState({ healthOk: true });
     res.type('html').send(trust.trustHtml(state));
+  });
+
+  // Public "notify-me-when-X-ships" capture. Per-IP rate-limit middleware
+  // already applies (mounted earlier in the chain). Persists every
+  // submission; forwards to NOTIFY_EMAIL via Resend if RESEND_API_KEY is set.
+  app.post('/notify-signup', notifySignup.handleSignup);
+
+  // Operator-only list of captured signups.
+  app.get('/admin/notify-signups', adminAuth, (_req, res) => {
+    res.json({ signups: notifySignup.list() });
   });
 
   app.post('/signup', async (req, res) => {

@@ -25,6 +25,7 @@ const usage = require('./usage');
 const packages = require('./packages');
 const cryptoSign = require('./crypto-sign');
 const attestation = require('./attestation');
+const dailyCap = require('./daily-cap');
 
 // Resolve the chain head AFTER a usage row was just appended for this
 // (tenant_id, app_id). usage.record() doesn't return the row_hash (the
@@ -127,6 +128,107 @@ function countCurrentCycleRequests(keyId) {
     if (Number.isFinite(ts) && ts >= cycleStartMs) n += 1;
   }
   return n;
+}
+
+// Enforce per-(tenant, app) DAILY caps BEFORE the monthly quota check.
+// This is the free-tier circuit breaker: even if the customer is within
+// their monthly request quota, a per-day budget prevents them from draining
+// the substrate's fallback capacity in one hot afternoon.
+//
+// ORDERING (intentional, see chat-api card brief):
+//   anomaly observer (res.on('finish')) → registered upstream in index.js
+//   customerAuth                        → fills req.apiKey
+//   rateLimitByTenant                   → per-tenant requests/sec circuit
+//   enforceDailyCap                     ← THIS — 429 daily_quota_exceeded
+//   enforcePackage                      → 429 quota_exceeded (monthly) / 403 tier_denied
+//   handleChatCompletions               → upstream call + usage.record()
+//
+// Daily-cap 429 is distinct from monthly-quota 429 via the `type` field
+// (`daily_quota_exceeded` vs `quota_exceeded`). Mounting daily-first means
+// a customer who has tripped the daily limit doesn't get a monthly-quota
+// "you have 99,000 requests left this month" header — that would read
+// like the gateway lying about why we refused.
+//
+// PASS-THROUGH: if the resolved package has no daily caps configured
+// (both fields null/undefined → legacy package), this middleware is a
+// no-op. Existing tiers (Starter / Pro / Enterprise) keep working.
+//
+// FALLBACK-TOKENS DEFINITION: for this card, every completion_token from
+// /v1/chat/completions counts as a fallback token. The substrate routes
+// every chat call to Qwen (the operator's own inference container), so
+// "fallback" here just means "model tokens we burned for the customer."
+// A future card can split Tier A vs Tier B (greenops-tier-doctrine 2026-
+// 05-08) — out of scope here.
+function enforceDailyCap(req, res, next) {
+  const apiKey = req.apiKey;
+  if (!apiKey) {
+    // Should be unreachable — customerAuth runs first — but fail closed
+    // the same way enforcePackage does.
+    return res.status(401).json({
+      error: { message: 'Unauthorized', type: 'invalid_api_key' },
+    });
+  }
+  const pkg = packages.resolveForKey(apiKey);
+  // No package configured at all → skip; enforcePackage logs the warning.
+  if (!pkg) return next();
+
+  const requestCap = (pkg.daily_request_cap === undefined) ? null : pkg.daily_request_cap;
+  const tokenCap = (pkg.daily_fallback_token_cap === undefined) ? null : pkg.daily_fallback_token_cap;
+  // Tier doesn't opt in to daily caps → pure pass-through.
+  if (requestCap === null && tokenCap === null) {
+    // Stash the package on req so we don't have to resolve it twice
+    // (enforcePackage will use the same value below).
+    req.cogosPackage = pkg;
+    return next();
+  }
+
+  const tenantId = apiKey.tenant_id;
+  const appId = apiKey.app_id;
+  const r = dailyCap.incrementAndCheck(tenantId, appId, {
+    requests_now: 1,
+    request_cap: requestCap,
+    token_cap: tokenCap,
+  });
+
+  // Always emit observability headers — even on success — so callers can
+  // see how close they are. Mirrors the X-Cogos-Quota-* headers the
+  // monthly enforcer sets.
+  if (requestCap !== null) {
+    res.set('X-Cogos-Daily-Request-Limit', String(requestCap));
+    res.set('X-Cogos-Daily-Request-Used', String(r.current.requests));
+  }
+  if (tokenCap !== null) {
+    res.set('X-Cogos-Daily-Token-Limit', String(tokenCap));
+    res.set('X-Cogos-Daily-Token-Used', String(r.current.fallback_tokens));
+  }
+
+  if (!r.ok) {
+    const retryAfterS = dailyCap.secondsUntilUtcMidnight();
+    res.set('Retry-After', String(retryAfterS));
+    logger.info('enforce_daily_cap_exceeded', {
+      key_id: apiKey.id,
+      tenant_id: tenantId,
+      app_id: appId,
+      package_id: pkg.id,
+      reason: r.reason,
+      current: r.current,
+      limits: r.limits,
+    });
+    return res.status(429).json({
+      error: {
+        message: 'Daily quota exceeded',
+        type: 'daily_quota_exceeded',
+        reason: r.reason,
+        package_id: pkg.id,
+        limits: r.limits,
+        current: r.current,
+        retry_after_s: retryAfterS,
+      },
+    });
+  }
+
+  req.cogosPackage = pkg;
+  return next();
 }
 
 // Enforce package quota + tier allowlist BEFORE forwarding upstream.
@@ -411,6 +513,45 @@ async function handleChatCompletions(req, res) {
     x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
   });
 
+  // Daily-cap token accounting. We already incremented the REQUEST counter
+  // pre-flight in enforceDailyCap; here we update the TOKEN counter with
+  // the completion_tokens we just produced. If this call pushes the day's
+  // total past the token cap, the in-flight response still completes (the
+  // bytes are about to ship below) — the NEXT request from this (tenant,
+  // app) on the same UTC day will get the 429 reason=token_cap. Spec
+  // calls this fair-to-the-customer behavior; their LAST request
+  // shouldn't be the one that fails.
+  //
+  // We resolve the package again here (instead of relying on req.cogosPackage
+  // exclusively) so that if a future code path mutates packages mid-request
+  // the recorded token count still goes against the up-to-date cap. Cost
+  // is one Map lookup — packages.resolveForKey() is in-memory.
+  if (req.apiKey && req.apiKey.tenant_id && completion_tokens > 0) {
+    const pkg = req.cogosPackage || packages.resolveForKey(req.apiKey);
+    const tokenCap = pkg && pkg.daily_fallback_token_cap !== undefined
+      ? pkg.daily_fallback_token_cap
+      : null;
+    // Only call into the cap module if the tier actually opted in. Saves
+    // a Map allocation for the (overwhelming majority of) non-free tiers.
+    if (tokenCap !== null) {
+      try {
+        dailyCap.incrementAndCheck(req.apiKey.tenant_id, req.apiKey.app_id, {
+          requests_now: 0,
+          fallback_tokens_now: completion_tokens,
+          // We don't read .ok here — the response is already going out.
+          // The cap check on the NEXT request will see the updated total.
+          request_cap: null,
+          token_cap: tokenCap,
+        });
+      } catch (e) {
+        // Token accounting must NEVER fail the request that already produced
+        // its response. Log and move on; worst-case the counter is off by
+        // one request's tokens until the next call refreshes it.
+        logger.warn('daily_cap_post_record_failed', { error: e.message });
+      }
+    }
+  }
+
   sendSignedJson(req, res, {
     id: requestId,
     object: 'chat.completion',
@@ -455,6 +596,7 @@ module.exports = {
   handleChatCompletions,
   handleListModels,
   enforcePackage,
+  enforceDailyCap,
   resolveModel,
   TIER_TO_MODEL,
   // exported for tests

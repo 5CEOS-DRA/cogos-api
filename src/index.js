@@ -5,7 +5,7 @@ const express = require('express');
 
 const logger = require('./logger');
 const { customerAuth, adminAuth } = require('./auth');
-const { handleChatCompletions, handleListModels, enforcePackage } = require('./chat-api');
+const { handleChatCompletions, handleListModels, enforcePackage, enforceDailyCap } = require('./chat-api');
 const keys = require('./keys');
 const usage = require('./usage');
 const stripeMod = require('./stripe');
@@ -357,7 +357,7 @@ function createApp() {
   // anonymous-flood case upstream.
   const tenantLimiter = rateLimitByTenant();
   app.get('/v1/models', customerAuth, tenantLimiter, handleListModels);
-  app.post('/v1/chat/completions', customerAuth, tenantLimiter, enforcePackage, handleChatCompletions);
+  app.post('/v1/chat/completions', customerAuth, tenantLimiter, enforceDailyCap, enforcePackage, handleChatCompletions);
 
   // ---- Customer-facing audit query (Security Hardening Card #3) ----
   // Returns the requesting tenant's hash-chained usage rows. Strictly

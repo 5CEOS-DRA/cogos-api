@@ -274,6 +274,105 @@ function createApp() {
     }
   });
 
+  // ---- Free-tier signup (no Stripe) ----
+  // Public, no auth. Per-IP rate limit already applies (mounted upstream).
+  // Path-based routing — explicitly NOT /signup?tier=free. A query-string
+  // overload of the Stripe-bound /signup would force packageId-parsing
+  // logic to fork in two places.
+  //
+  // Gating: the "free" package must exist in the registry AND have
+  // public_signup === true. Either condition false → 503. Operator can
+  // disable free-tier signup at runtime by flipping public_signup via
+  // PUT /admin/packages/free without touching code.
+  //
+  // Idempotency by email: prevents the route from becoming an oracle
+  // for "is this email already a customer" (label match returns the
+  // already-exists page either way) AND prevents printing N keys for
+  // the same email. Anonymous (no-email) signups are NOT deduped —
+  // each anonymous POST issues a fresh key. Anonymous abuse mitigation
+  // is the per-IP rate limit, not idempotency.
+  //
+  // Email is opaque: NOT validated, NOT lowercased server-side beyond
+  // what the label substring match needs. Treated as a free-text tag.
+  // Future card: CAPTCHA, email-confirmation, customer self-service
+  // recovery via Resend.
+  app.post('/signup/free', async (req, res) => {
+    try {
+      const all = packages.list();
+      const freePkg = all.find((p) => p.id === 'free');
+      if (!freePkg || freePkg.public_signup !== true) {
+        logger.warn('signup_free_not_enabled', {
+          present: !!freePkg,
+          public_signup: freePkg ? freePkg.public_signup : null,
+        });
+        return res.status(503).json({ error: 'Free tier not enabled' });
+      }
+
+      // Email is opaque. Accept anything (or nothing). We DO trim the
+      // surrounding whitespace so a copy-paste with a trailing newline
+      // doesn't create a separate identity. We do NOT lowercase: case-
+      // preservation lets two operators inspect labels and tell the
+      // submission apart from a duplicate-with-different-case (a manual
+      // recovery signal). The exact-string match below is therefore
+      // case-sensitive — documented in the report.
+      const rawEmail = req.body && req.body.email;
+      const email = (typeof rawEmail === 'string' && rawEmail.trim())
+        ? rawEmail.trim()
+        : '';
+
+      // Idempotency: only when an email was provided. Anonymous signups
+      // are not deduplicated — every anonymous POST mints a fresh key.
+      if (email) {
+        const wantedLabel = `free-signup:${email}`;
+        const existing = keys.list().find((k) =>
+          k.label === wantedLabel && k.active !== false
+        );
+        if (existing) {
+          logger.info('signup_free_already_exists', { tenant_id: existing.tenant_id });
+          return res.type('html').send(landing.freeSignupHtml({
+            apiKey: null,
+            hmacSecret: null,
+            expiresAt: null,
+            alreadyExists: true,
+            email,
+          }));
+        }
+      }
+
+      // Mint a fresh free-tier key. tenant_id is `free-<random>` so each
+      // visitor gets an isolated tenant (no shared-quota collision). The
+      // bearer scheme keeps the issued-on-form-submit UX simple — no
+      // PEM key material to display.
+      const tenantId = `free-${require('crypto').randomBytes(8).toString('hex')}`;
+      const issued = keys.issue({
+        tenantId,
+        scheme: 'bearer',
+        tier: 'free',
+        package_id: 'free',
+        label: email ? `free-signup:${email}` : 'free-signup',
+      });
+
+      logger.info('signup_free_issued', {
+        tenant_id: tenantId,
+        has_email: !!email,
+      });
+
+      res.type('html').send(landing.freeSignupHtml({
+        apiKey: issued.plaintext,
+        hmacSecret: issued.hmac_secret,
+        expiresAt: issued.record.expires_at,
+        alreadyExists: false,
+        email,
+      }));
+    } catch (e) {
+      logger.error('signup_free_failed', { error: e.message });
+      res.status(500).type('html').send(
+        `<p>Could not issue free-tier key: ${e.message}. ` +
+        `Contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.</p>`
+      );
+    }
+  });
+
   app.get('/success', async (req, res) => {
     const sessionId = req.query.session_id;
     if (!sessionId) return res.status(400).send('Missing session_id');

@@ -38,6 +38,7 @@ Update this file (or write a new dated snapshot next to it) whenever the product
 | Scanner-target paths return canary content | `curl https://cogos.5ceos.com/.env` → fake env with AKIAIOSFODNN7EXAMPLE canary |
 | Anomaly detector in shadow mode | Logs to `data/anomalies.jsonl`; doesn't block. See `src/anomaly.js` |
 | Distroless runtime — no shell in container | `docker run --rm cogos5ceos.azurecr.io/cogos-api:v13 sh` → fails (no sh) |
+| HMAC + attestation key at rest | Envelope-encrypted with a KV-resolved DEK; disk breach yields ciphertext | source: `src/dek.js`, `src/keys.js`, `src/attestation.js` |
 
 ### Endpoints currently served
 
@@ -95,6 +96,26 @@ Not yet set but supported by the code:
 - `COSIGN_PUBKEY_FILE` — alternative to `COSIGN_PUBKEY_PEM`, points at a file in the container
 - `ANOMALIES_FILE` — overrides default `data/anomalies.jsonl` path for the anomaly log
 - `KEYS_FILE`, `USAGE_FILE`, `PACKAGES_FILE`, `STRIPE_EVENTS_FILE` — data file overrides
+
+---
+
+## At-rest encryption: Data Encryption Key (DEK)
+
+HMAC secrets (one per customer record in `data/keys.json`) and the persisted attestation signing private PEM (`data/attestation-key.pem`) are envelope-encrypted under a Data Encryption Key resolved at startup. See `src/dek.js` for the substrate (AES-256-GCM, 12-byte random nonce per seal, 16-byte auth tag).
+
+DEK source priority (first match wins):
+
+1. `COGOS_DEK_HEX` env — 64-char hex string (32 raw bytes). Production wires this from Key Vault via Container App secret reference.
+2. `COGOS_DEK_FILE` env — path to a file containing the hex DEK or raw 32 bytes. Used by operator scripts that mount the secret as a file.
+3. On-disk fallback at `data/.dek` (mode 0600). Generated lazily on first access so dev + early-prod runs work without KV wiring.
+
+The startup log line `dek_resolved {source: env|file|generated}` surfaces which path resolved. The key value itself is never logged.
+
+**Operator action — flip from on-disk-generated DEK to KV-resolved:** set `COGOS_DEK_HEX` env on the Container App from a KV secret reference (e.g. `@Microsoft.KeyVault(SecretUri=...)`), then `az containerapp update --set-env-vars COGOS_DEK_HEX=<secret-ref>`. Existing records keep working because the in-process DEK doesn't change — the key value in KV must match the value previously generated. To rotate the DEK itself, see the TODO below.
+
+**TODO — DEK rotation + legacy re-encrypt:**
+- DEK rotation today is a stop-the-world story: rotating the DEK requires decrypting every sealed record with the old key and re-sealing under the new one. A `scripts/rotate-dek.sh` would let an operator do this offline; not built yet.
+- Legacy records (issued before this card) carry cleartext `hmac_secret` on disk. They are migrated to the sealed shape on the next `verify()` touch (i.e. the next request authenticated by that key). Records that never touch verify stay cleartext until a force-migrate script is built.
 
 ---
 

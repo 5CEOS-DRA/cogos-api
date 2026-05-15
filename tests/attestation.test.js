@@ -22,6 +22,13 @@ process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
 process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
 process.env.OLLAMA_URL = 'http://ollama.test';
 process.env.DEFAULT_MODEL = 'qwen2.5:3b-instruct';
+// Isolate the persisted attestation key in tmpDir so the sealed-shape
+// assertion can read it back without polluting the repo's data/ dir.
+process.env.ATTESTATION_KEY_FILE = path.join(tmpDir, 'attestation-key.pem');
+// Pin a deterministic DEK for the at-rest-shape assertion below. The
+// DEK is also used by src/keys.js for hmac_secret sealing — keys issued
+// in this test file are sealed under the same key.
+process.env.COGOS_DEK_HEX = crypto.randomBytes(32).toString('hex');
 
 const request = require('supertest');
 const nock = require('nock');
@@ -76,6 +83,30 @@ describe('attestation: /attestation.pub endpoint', () => {
     expect(k.asymmetricKeyType).toBe('ed25519');
     // kid header echoes the first 16 hex of sha256(pem).
     expect(res.headers['x-cogos-attestation-kid']).toMatch(/^[a-f0-9]{16}$/);
+  });
+});
+
+// at-rest-encrypt-attestation-key card (2026-05-14): when a DEK is
+// configured, the persisted private PEM file is replaced by a JSON-shape
+// sealed envelope. Disk breach yields ciphertext only.
+describe('attestation: persisted key file is sealed (JSON-shape) under DEK', () => {
+  test('data/attestation-key.pem on disk is a JSON envelope, NOT raw PEM', async () => {
+    // Force the keypair to materialize so the persistence path runs.
+    const app = createApp();
+    const res = await request(app).get('/attestation.pub');
+    expect(res.status).toBe(200);
+    // Read what was actually written to disk.
+    const raw = fs.readFileSync(process.env.ATTESTATION_KEY_FILE, 'utf8');
+    // PEM shape would start with `-----BEGIN`. Sealed shape starts with `{`.
+    expect(raw.trimStart()[0]).toBe('{');
+    expect(raw).not.toMatch(/-----BEGIN /);
+    // Parses as JSON with the dek envelope shape.
+    const env = JSON.parse(raw);
+    expect(env).toEqual(expect.objectContaining({
+      ciphertext_b64: expect.any(String),
+      nonce_b64: expect.any(String),
+      tag_b64: expect.any(String),
+    }));
   });
 });
 

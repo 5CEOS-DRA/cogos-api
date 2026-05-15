@@ -102,6 +102,7 @@
 const crypto = require('crypto');
 const fs = require('node:fs');
 const path = require('node:path');
+const dek = require('./dek');
 
 // -- attestation keypair --------------------------------------------------------
 // Persist the keypair across container restarts so previously-issued receipts
@@ -128,12 +129,42 @@ function _keyFilePath() {
     || path.join(process.cwd(), 'data', 'attestation-key.pem');
 }
 
+// Load the persisted private PEM from disk. Detects the at-rest shape:
+//   - sealed envelope: JSON object with {ciphertext_b64, nonce_b64, tag_b64}
+//     (the new default — see src/dek.js). Detected by `data[0] === '{'`.
+//   - cleartext PEM: starts with `-----BEGIN ` (legacy, pre-encrypt-at-rest).
+// Returns the cleartext PEM string. Throws on read/decrypt failure so the
+// caller can fall through to generate-fresh.
+function _readPersistedPem(filePath) {
+  const data = fs.readFileSync(filePath, 'utf8');
+  const trimmed = data.trimStart();
+  if (trimmed[0] === '{') {
+    // Sealed envelope. Open under the DEK.
+    const env = JSON.parse(trimmed);
+    return dek.open(env).toString('utf8');
+  }
+  // Legacy cleartext PEM. Pass through unchanged.
+  return data;
+}
+
+// Persist the private PEM. Always sealed under the DEK going forward —
+// disk breach yields ciphertext only. See src/dek.js for the substrate
+// + DEK source priority. Best-effort: if the dir isn't writable we
+// fall back to ephemeral (caller logs once).
+function _writePersistedPem(filePath, privPem) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
+  const env = dek.seal(Buffer.from(privPem, 'utf8'));
+  // Pretty-printed for operator-grep ergonomics; the JSON wrapper isn't
+  // load-bearing for crypto, only for the at-rest detection prefix check.
+  fs.writeFileSync(filePath, JSON.stringify(env, null, 2), { mode: 0o600 });
+}
+
 function _ensureKeyPair() {
   if (_priv && _pub) return;
   const filePath = _keyFilePath();
-  // 1) Try to load an existing persisted key.
+  // 1) Try to load an existing persisted key (sealed or legacy PEM).
   try {
-    const pem = fs.readFileSync(filePath, 'utf8');
+    const pem = _readPersistedPem(filePath);
     const priv = crypto.createPrivateKey(pem);
     const pub = crypto.createPublicKey(priv);
     _priv = priv;
@@ -151,9 +182,8 @@ function _ensureKeyPair() {
   _pubPem = publicKey.export({ type: 'spki', format: 'pem' });
   _kid = _computeKid(_pubPem);
   try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true, mode: 0o700 });
     const privPem = privateKey.export({ type: 'pkcs8', format: 'pem' });
-    fs.writeFileSync(filePath, privPem, { mode: 0o600 });
+    _writePersistedPem(filePath, privPem);
   } catch (e) {
     if (!process.env.ATTESTATION_QUIET) {
       console.warn(`[attestation] could not persist key at ${filePath}: ${e.message} — receipts will not survive restart`);

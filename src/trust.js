@@ -282,6 +282,39 @@ function renderPentestSection(state) {
 </table>`;
 }
 
+// Renders the latest public hash-chain checkpoint plus the
+// verify-yourself curl command. Empty-state is the expected pre-data
+// state — the very first checkpoint requires at least one usage row to
+// exist, so on a fresh deploy this section is the placeholder.
+function renderCheckpointSection(s) {
+  const c = s.latestCheckpoint;
+  const chainLen = (s.checkpointChain && typeof s.checkpointChain.chain_length === 'number')
+    ? s.checkpointChain.chain_length
+    : 0;
+  if (!c) {
+    return `<div class="placeholder">
+  No public checkpoint recorded yet. The scheduler computes one every hour from every (tenant, app_id) chain head and appends it to <code>data/audit-checkpoints.jsonl</code>; the first checkpoint appears after the first usage row exists. Endpoints:
+  <ul style="margin-top:8px">
+    <li><code>GET <a href="/audit/checkpoint/latest">/audit/checkpoint/latest</a></code></li>
+    <li><code>GET /audit/checkpoint?ts=&lt;unix_ms&gt;</code> — nearest-before for a captured ts</li>
+    <li><code>GET /audit/checkpoints?limit=N&amp;since_ms=M</code> — paginated history</li>
+    <li><code>GET <a href="/audit/checkpoint/verify">/audit/checkpoint/verify</a></code> — operator-verifies local file is untampered</li>
+  </ul>
+</div>`;
+  }
+  const headPrefix = String(c.global_head || '').slice(0, 16);
+  return `<p>Every hour we snapshot every <code>(tenant_id, app_id)</code> chain head into a globally hash-chained checkpoint. Capture <code>global_head</code> now, replay <code>/audit/checkpoint?ts=&lt;your_capture_ts&gt;</code> later, prove we haven&apos;t rewritten any row in between.</p>
+<table>
+  <tr><th>Last checkpoint</th><td><code>${escapeHtml(c.ts || 'unknown')}</code></td></tr>
+  <tr><th>Global head (prefix)</th><td><code>${escapeHtml(headPrefix)}…</code></td></tr>
+  <tr><th>Partitions snapshotted</th><td>${escapeHtml(c.partition_count)}</td></tr>
+  <tr><th>Chain length</th><td>${escapeHtml(chainLen)} checkpoint${chainLen === 1 ? '' : 's'} on disk</td></tr>
+</table>
+<p style="font-size:12px;color:#8b949e;margin:8px 0 4px">Verify yourself:</p>
+<pre><code>curl -s https://${escapeHtml(SERVICE_DOMAIN)}/audit/checkpoint/latest
+curl -s https://${escapeHtml(SERVICE_DOMAIN)}/audit/checkpoint/verify</code></pre>`;
+}
+
 function renderContinuousProbes(s) {
   const p = s.latestProbe;
   if (!p) {
@@ -326,6 +359,9 @@ ${renderRevisionsSection(s)}
 
 <h2>Published security advisories</h2>
 ${renderAdvisoriesSection(s)}
+
+<h2>Public hash-chain checkpoint</h2>
+${renderCheckpointSection(s)}
 
 <h2>Continuous probes</h2>
 ${renderContinuousProbes(s)}
@@ -425,6 +461,20 @@ function loadLatestProbe() {
   }
 }
 
+// Read the latest public hash-chain checkpoint + the local verify
+// result. Both calls are read-only (no chain mutation), and both swallow
+// failure into a null/empty shape so a corrupt file never throws into
+// the /trust render. See src/audit-checkpoint.js for the chain
+// semantics + when "no checkpoint" is the expected state.
+function loadLatestCheckpoint() {
+  try { return require('./audit-checkpoint').latest(); }
+  catch { return null; }
+}
+function loadCheckpointChainStatus() {
+  try { return require('./audit-checkpoint').verifyChain(); }
+  catch { return { ok: true, chain_length: 0, broke_at_index: null, reason: null }; }
+}
+
 function buildTrustState({ healthOk = true } = {}) {
   let pkgVersion = '0.1.0';
   try {
@@ -442,6 +492,8 @@ function buildTrustState({ healthOk = true } = {}) {
     advisories: [], // none published; do not fabricate
     pentestHistory: loadPentestHistory(),
     latestProbe: loadLatestProbe(),
+    latestCheckpoint: loadLatestCheckpoint(),
+    checkpointChain: loadCheckpointChainStatus(),
     renderedAt: new Date().toISOString(),
   };
 }

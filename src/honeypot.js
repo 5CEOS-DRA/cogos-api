@@ -24,8 +24,37 @@
 //
 // We log every hit at WARN level. The middleware is terminal for the
 // matched paths — it returns the response and never calls next().
+//
+// Hits are ALSO persisted to data/honeypots.jsonl via appendHit() so
+// the operator analytics endpoint (/admin/analytics/honeypots) can
+// surface real time-series numbers — see src/analytics.js. The append
+// is fail-safe via src/event-log.js: a disk error logs at WARN and
+// returns; the canary response still ships.
 
+const path = require('path');
 const logger = require('./logger');
+const eventLog = require('./event-log');
+
+// File-path resolver. Honors HONEYPOTS_FILE for test/operator overrides
+// (tests point this at a tmpdir so the repo data/ folder stays clean);
+// defaults to data/honeypots.jsonl under process.cwd() to match the
+// convention used by src/notify-signup.js (SIGNUPS_FILE).
+function honeypotsFile() {
+  return process.env.HONEYPOTS_FILE
+    || path.join(process.cwd(), 'data', 'honeypots.jsonl');
+}
+
+// Append one honeypot-hit row. Schema is fixed:
+//
+//   { ts, path, normalized_path, method, ip, ua, country }
+//
+// `country` is null in v1 — a future card can enrich via GeoIP at the
+// edge or operator-side lookup. `normalized_path` is the lowercased +
+// trailing-slash-stripped form the lookup actually used (so scanner
+// variants `/.ENV` and `/.env/` both map to `/.env` for aggregation).
+function appendHit(row) {
+  return eventLog.appendEvent(honeypotsFile(), row);
+}
 
 // ---------------------------------------------------------------------------
 // Canary tokens. These appear verbatim inside the response bodies. They are
@@ -251,14 +280,29 @@ function honeypot(req, res, next) {
   const p = req.path;
   if (!isHoneypotPath(p)) return next();
 
+  const n = normalizePath(p);
+  const ip = req.ip || (req.socket && req.socket.remoteAddress) || null;
+  const ua = (req.headers && req.headers['user-agent']) || null;
+
   logger.warn('honeypot_hit', {
     path: p,
-    ip: req.ip,
-    ua: req.headers['user-agent'],
+    ip,
+    ua,
     method: req.method,
   });
 
-  const n = normalizePath(p);
+  // Persist the hit for analytics. appendHit is fail-safe — a disk
+  // error logs at WARN and returns; the canary response still ships.
+  appendHit({
+    ts: new Date().toISOString(),
+    path: p,
+    normalized_path: n,
+    method: req.method,
+    ip,
+    ua,
+    country: null,
+  });
+
   if (FAKE_API_VERSIONS.test(n)) {
     return sendJson(res, 401, { error: 'invalid token' });
   }
@@ -268,4 +312,6 @@ function honeypot(req, res, next) {
 
 module.exports = honeypot;
 module.exports.isHoneypotPath = isHoneypotPath;
+module.exports.appendHit = appendHit;
+module.exports.honeypotsFile = honeypotsFile;
 module.exports._TOKEN = TOKEN; // exported for test introspection only

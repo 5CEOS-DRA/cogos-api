@@ -15,6 +15,11 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-api-test-'));
 process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
 process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
 process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
+// Isolate the persist-events JSONL files so this suite doesn't leak
+// into the repo's data/ directory when a daily-cap or rate-limit 429
+// fires during the chat-completions integration tests below.
+process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
+process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
 process.env.OLLAMA_URL = 'http://ollama.test';
 process.env.DEFAULT_MODEL = 'qwen2.5:3b-instruct';
 

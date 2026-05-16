@@ -84,6 +84,13 @@ function cookbookHtml() {
 <h1>The CogOS cookbook</h1>
 <div class="meta">Six archetypal patterns. Copy, paste, ship.</div>
 
+<div class="meta" style="margin-bottom:24px">
+  On this page:
+  <a href="#verify-signature">Verify signature</a> &middot;
+  <a href="#verify-attestation">Verify attestation</a> &middot;
+  <a href="#sdks">SDKs</a>
+</div>
+
 <p>
 Every production LLM feature ends up being one of about six shapes:
 extracting structured data, classifying with reasons, routing to a
@@ -479,6 +486,46 @@ console.log(\`verified: rev=\${payload.rev} chain_head=\${payload.chain_head.sli
 <div class="lesson">Lesson: the signature is over the <em>token payload</em>, not over the response body. A MITM that rewrites the body but keeps the original token will leave the token signature-valid &mdash; but <code>resp_hash</code> inside the token will no longer match <code>sha256(body)</code> you received. That hash mismatch is the detection mechanism. Always verify BOTH the Ed25519 signature AND the resp_hash bind.</div>
 
 <div class="lesson">Operational note: each container restart rotates the keypair. The fetch of <code>/attestation.pub</code> is therefore live, not cached &mdash; same operational shape as TLS cert rotation. Tokens you stored from a previous deploy can no longer be verified against the current pubkey; for long-lived court-defensible receipts, capture the pubkey alongside the token at issuance time.</div>
+</div>
+
+<hr>
+
+<h2 id="sdks">SDKs</h2>
+
+<div class="recipe">
+<p>The curl recipes above are the ground truth, but for production code you probably want a typed client that handles bearer auth, HMAC verification, and attestation verification for you. The SDKs are published on PyPI and npm as <code>cogos</code> &mdash; same name, both registries.</p>
+
+<p>Both wrap the same wire protocol and raise on any verification failure &mdash; tampering is impossible to ignore by accident. The SDKs are MIT-licensed and source-available at <code>sdks/python/</code> and <code>sdks/node/</code> in the repo.</p>
+
+<h3>Python</h3>
+
+<pre><span class="code-label">shell</span><code>pip install cogos</code></pre>
+
+<pre><span class="code-label">python</span><code>from cogos import Client
+
+client = Client(api_key="sk-cogos-...", hmac_secret="...")
+resp = client.chat.completions.create(
+    model="cogos-tier-b",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp["choices"][0]["message"]["content"])
+# HMAC + attestation auto-verified — raises if anything is tampered.</code></pre>
+
+<h3>Node</h3>
+
+<pre><span class="code-label">shell</span><code>npm install cogos</code></pre>
+
+<pre><span class="code-label">javascript</span><code>import { Cogos } from 'cogos';
+
+const client = new Cogos({ apiKey: 'sk-cogos-...', hmacSecret: '...' });
+const resp = await client.chat.completions.create({
+  model: 'cogos-tier-b',
+  messages: [{ role: 'user', content: 'Hello' }],
+});
+console.log(resp.choices[0].message.content);
+// HMAC + attestation auto-verified — throws if anything is tampered.</code></pre>
+
+<div class="lesson">Lesson: the SDKs wrap bearer auth, automatically verify the <code>X-Cogos-Signature</code> HMAC, and automatically verify the per-response <code>X-Cogos-Attestation</code> Ed25519 token (including <code>req_hash</code> and <code>resp_hash</code> bindings). Both raise on verification failure &mdash; you can&apos;t accidentally trust a tampered response.</div>
 </div>
 
 <hr>

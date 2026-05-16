@@ -513,9 +513,9 @@ print(resp["choices"][0]["message"]["content"])
 
 <h3>Node</h3>
 
-<pre><span class="code-label">shell</span><code>npm install cogos</code></pre>
+<pre><span class="code-label">shell</span><code>npm install cogos-client</code></pre>
 
-<pre><span class="code-label">javascript</span><code>import { Cogos } from 'cogos';
+<pre><span class="code-label">javascript</span><code>import { Cogos } from 'cogos-client';
 
 const client = new Cogos({ apiKey: 'sk-cogos-...', hmacSecret: '...' });
 const resp = await client.chat.completions.create({

@@ -1,4 +1,4 @@
-# cogos
+# cogos-client
 
 Node client for [cogos.5ceos.com](https://cogos.5ceos.com) — schema-locked LLM
 inference with cryptographic response signing.
@@ -7,13 +7,13 @@ Zero runtime dependencies. Pure Node stdlib (`https`, `crypto`, `url`).
 TypeScript types shipped. Requires Node 20+.
 
 ```
-npm install cogos
+npm install cogos-client
 ```
 
 ## Quick start
 
 ```ts
-import { Cogos } from 'cogos';
+import { Cogos } from 'cogos-client';
 
 const client = new Cogos({
   apiKey: process.env.COGOS_API_KEY!,
@@ -108,7 +108,7 @@ persistent ed25519 private key so the gateway never sees a reusable
 auth secret.
 
 ```ts
-import { Cogos, Ed25519Signer } from 'cogos';
+import { Cogos, Ed25519Signer } from 'cogos-client';
 
 const signer = new Ed25519Signer(fs.readFileSync('cogos.priv', 'utf8'), 'kid-abc123');
 const client = new Cogos({ ed25519Signer: signer, hmacSecret: '…' });
@@ -121,7 +121,7 @@ Decrypt a customer-sealed audit row. Returns the cleartext content object
 do this — your X25519 private key is the only key that opens the envelope.
 
 ```ts
-import { unsealAuditRow } from 'cogos';
+import { unsealAuditRow } from 'cogos-client';
 const x25519Priv = fs.readFileSync('cogos.x25519.priv', 'utf8');
 const slice = await client.audit.read({ limit: 100 });
 for (const row of slice.rows) {

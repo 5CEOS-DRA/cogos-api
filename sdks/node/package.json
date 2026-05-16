@@ -1,5 +1,5 @@
 {
-  "name": "cogos",
+  "name": "cogos-client",
   "version": "0.1.0",
   "description": "Node client for cogos.5ceos.com — schema-locked LLM inference with cryptographic response signing",
   "license": "MIT",

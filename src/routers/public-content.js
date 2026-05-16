@@ -90,6 +90,28 @@ function makePublicContentRouter() {
     res.type('html').send(trust.trustHtml(state));
   });
 
+  // /status alias — developers type this expecting a status page. /trust
+  // already serves uptime + hash-chain checkpoint + continuous probes +
+  // advisories, so redirect rather than maintain a second surface.
+  router.get('/status', (_req, res) => res.redirect(308, '/trust'));
+
+  // /signup GET — the canonical signup is a POST form-action target on the
+  // landing page. Address-bar typers shouldn't get a bare 404. Redirect to
+  // home where the form lives.
+  router.get('/signup', (_req, res) => res.redirect(303, '/'));
+  router.get('/signup/free', (_req, res) => res.redirect(303, '/'));
+
+  // OpenAPI 3.0 spec for the /v1 surface. Served from a static JSON file
+  // committed in the repo so it's reproducible and reviewable in PRs.
+  router.get('/openapi.json', (_req, res) => {
+    try {
+      const spec = fs.readFileSync(__dirname + '/../../openapi.json', 'utf8');
+      res.type('application/json').send(spec);
+    } catch (err) {
+      res.status(500).json({ error: 'openapi.json not found in deployment image' });
+    }
+  });
+
   return router;
 }
 

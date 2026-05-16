@@ -1,0 +1,262 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "CogOS API",
+    "description": "Schema-locked, tier-routed LLM gateway with cryptographic response signing. The `/v1/chat/completions` request and response shape is API-compatible with the widely-adopted format so existing client SDKs work without modification. Byte-identical outputs at temperature 0. Hash-chained per-(tenant, app) audit. Sovereign inference — CogOS runs its own pinned models in a sibling container; no third-party hosted LLM is in the prod request path.",
+    "version": "0.1.0",
+    "contact": { "email": "support@5ceos.com", "url": "https://cogos.5ceos.com" },
+    "license": { "name": "Proprietary (API)", "url": "https://cogos.5ceos.com/terms" }
+  },
+  "servers": [
+    { "url": "https://cogos.5ceos.com", "description": "Production" }
+  ],
+  "tags": [
+    { "name": "completions", "description": "OpenAI-shape chat completions" },
+    { "name": "models", "description": "Available models" },
+    { "name": "audit", "description": "Hash-chained audit receipts per (tenant, app)" },
+    { "name": "signup", "description": "Free-tier key issuance" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "ApiKey": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "sk-cogos-...",
+        "description": "API key issued at /signup/free. Format: `sk-cogos-` followed by 32 hex chars."
+      }
+    },
+    "schemas": {
+      "ChatCompletionRequest": {
+        "type": "object",
+        "required": ["model", "messages"],
+        "properties": {
+          "model": {
+            "type": "string",
+            "enum": ["cogos-tier-a", "cogos-tier-b"],
+            "description": "Tier A = 7B narrative; Tier B = 3B classification/scoring/extraction. The tier_for_task router prefers B for schema-constrained or short-decode tasks."
+          },
+          "messages": {
+            "type": "array",
+            "items": { "$ref": "#/components/schemas/ChatMessage" }
+          },
+          "temperature": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 2,
+            "default": 0,
+            "description": "Recommend 0 for byte-identical reproducibility. Higher values defeat the determinism guarantee."
+          },
+          "max_tokens": { "type": "integer", "minimum": 1 },
+          "response_format": {
+            "type": "object",
+            "description": "Schema-locked decoding. With `strict: true`, the decoder physically cannot emit a token that violates the grammar.",
+            "properties": {
+              "type": { "type": "string", "enum": ["text", "json_object", "json_schema"] },
+              "strict": { "type": "boolean", "default": false },
+              "schema": { "type": "object", "description": "JSON Schema object when type=json_schema" }
+            }
+          },
+          "stream": { "type": "boolean", "default": false }
+        }
+      },
+      "ChatMessage": {
+        "type": "object",
+        "required": ["role", "content"],
+        "properties": {
+          "role": { "type": "string", "enum": ["system", "user", "assistant"] },
+          "content": { "type": "string" }
+        }
+      },
+      "ChatCompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "enum": ["chat.completion"] },
+          "created": { "type": "integer", "description": "Unix epoch seconds" },
+          "model": { "type": "string", "description": "Resolved upstream model (e.g. `qwen2.5:3b-instruct`)" },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": { "type": "integer" },
+                "message": { "$ref": "#/components/schemas/ChatMessage" },
+                "finish_reason": { "type": "string", "enum": ["stop", "length", "content_filter"] }
+              }
+            }
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "prompt_tokens": { "type": "integer" },
+              "completion_tokens": { "type": "integer" },
+              "total_tokens": { "type": "integer" }
+            }
+          },
+          "cogos": {
+            "type": "object",
+            "description": "CogOS-specific metadata block (non-OpenAI). Includes schema enforcement flag, server-side latency, and the request_id you can use to look up the audit receipt.",
+            "properties": {
+              "schema_enforced": { "type": "boolean" },
+              "latency_ms": { "type": "integer" },
+              "request_id": { "type": "string" }
+            }
+          }
+        }
+      },
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "object": { "type": "string", "enum": ["model"] },
+          "created": { "type": "integer" },
+          "owned_by": { "type": "string", "example": "cogos" }
+        }
+      },
+      "AuditChainHead": {
+        "type": "object",
+        "description": "Current head of the hash-chained audit log for the requesting (tenant, app). Sign this and archive it to prove later that the chain was not rewritten.",
+        "properties": {
+          "tenant_id": { "type": "string" },
+          "head_hash": { "type": "string", "description": "Hex-encoded SHA-256 of the latest receipt + its predecessor hash" },
+          "height": { "type": "integer", "description": "Number of receipts in this chain" },
+          "as_of": { "type": "string", "format": "date-time" },
+          "signature": { "type": "string", "description": "Ed25519 signature over (tenant_id || head_hash || height || as_of)" },
+          "attestation_kid": { "type": "string", "description": "Key ID for the attestation public key; fetch the PEM at /attestation.pub" }
+        }
+      },
+      "Error": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" },
+              "message": { "type": "string" },
+              "code": { "type": "string" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "security": [{ "ApiKey": [] }],
+  "paths": {
+    "/v1/chat/completions": {
+      "post": {
+        "tags": ["completions"],
+        "summary": "Create a chat completion (schema-locked, signed response)",
+        "description": "Request/response shape is the widely-adopted `/v1/chat/completions` format, so existing client SDKs work unmodified. Every response is HMAC-signed; verify the `X-Cogos-Signature` header against your HMAC secret. At `temperature: 0` with `response_format.strict: true`, outputs are byte-identical across N identical-input calls.",
+        "operationId": "createChatCompletion",
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionRequest" } } }
+        },
+        "responses": {
+          "200": {
+            "description": "Completion returned. Verify `X-Cogos-Signature` before trusting `choices[].message.content`.",
+            "headers": {
+              "X-Cogos-Signature": { "schema": { "type": "string" }, "description": "HMAC-SHA256 over the response body, using your HMAC secret." },
+              "X-Cogos-Attestation": { "schema": { "type": "string" }, "description": "Ed25519 signature over the response body, verifiable with /attestation.pub" },
+              "X-Request-Id": { "schema": { "type": "string" }, "description": "Maps to the audit-receipt id; cite this when contacting support." }
+            },
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ChatCompletionResponse" } } }
+          },
+          "401": { "description": "Missing or invalid API key", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } },
+          "429": { "description": "Daily cap exceeded (free tier: 100 req/day)", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" } } } }
+        }
+      }
+    },
+    "/v1/models": {
+      "get": {
+        "tags": ["models"],
+        "summary": "List available models",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "Models list",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": { "type": "string", "enum": ["list"] },
+                    "data": { "type": "array", "items": { "$ref": "#/components/schemas/Model" } }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid API key" }
+        }
+      }
+    },
+    "/v1/audit/chain-head": {
+      "get": {
+        "tags": ["audit"],
+        "summary": "Current head of the hash-chained audit log for this (tenant, app)",
+        "description": "Returns the cryptographically-signed head of your audit chain. Sign-and-archive workflow: pull this endpoint on a cadence (daily/weekly), archive the signature, and you can prove later that the chain was not rewritten between two points in time.",
+        "operationId": "getAuditChainHead",
+        "responses": {
+          "200": {
+            "description": "Chain head + Ed25519 signature",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AuditChainHead" } } }
+          },
+          "401": { "description": "Missing or invalid API key" }
+        }
+      }
+    },
+    "/signup/free": {
+      "post": {
+        "tags": ["signup"],
+        "summary": "Issue a free-tier API key (no email required)",
+        "description": "Returns an HTML page with the new `sk-cogos-...` key and the matching HMAC secret. The key is shown once. Idempotent on email: if the supplied email already has a key, no second key is minted.",
+        "security": [],
+        "requestBody": {
+          "required": false,
+          "content": {
+            "application/x-www-form-urlencoded": {
+              "schema": {
+                "type": "object",
+                "properties": { "email": { "type": "string", "format": "email", "description": "Optional. Used for support contact and dedup." } }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Either the new-key page or an already-exists notice.",
+            "content": { "text/html": { "schema": { "type": "string" } } }
+          },
+          "429": { "description": "Per-IP signup rate limited" }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": ["audit"],
+        "summary": "Liveness check",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Service alive",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string", "enum": ["ok"] },
+                    "service": { "type": "string" },
+                    "version": { "type": "string" },
+                    "uptime_s": { "type": "integer" },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

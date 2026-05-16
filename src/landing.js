@@ -415,8 +415,8 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp["choices"][0]["message"]["content"])</code></pre>
-<pre><code>// Node — npm install cogos
-import { Cogos } from 'cogos';
+<pre><code>// Node — npm install cogos-client
+import { Cogos } from 'cogos-client';
 const client = new Cogos({ apiKey: '${apiKey || 'sk-cogos-XXXXXXX'}', hmacSecret: '...' });
 const resp = await client.chat.completions.create({
   model: 'cogos-tier-b',
@@ -635,8 +635,8 @@ resp = client.chat.completions.create(
     messages=[{"role": "user", "content": "Hello"}],
 )
 print(resp["choices"][0]["message"]["content"])</code></pre>
-<pre><code>// Node — npm install cogos
-import { Cogos } from 'cogos';
+<pre><code>// Node — npm install cogos-client
+import { Cogos } from 'cogos-client';
 const client = new Cogos({ apiKey: '${safeKey}', hmacSecret: '...' });
 const resp = await client.chat.completions.create({
   model: 'cogos-tier-b',

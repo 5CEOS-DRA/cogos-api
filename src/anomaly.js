@@ -479,6 +479,16 @@ function observeLatency(ms, now) {
 // ---------------------------------------------------------------------------
 function middleware(req, res, next) {
   const startMs = Date.now();
+  // CAPTURE the request path AT ENTRY time. Express mutates req.url when
+  // a sub-Router dispatches (the mount prefix is stripped from req.url
+  // inside the router handler), and that mutation is visible in the
+  // res.on('finish') callback below. So if we read req.path inside
+  // observe(), routes mounted via app.use('/v1', v1Router) report a
+  // last_path of '/chat/completions' instead of '/v1/chat/completions'
+  // — breaking signals that match on the full path. originalUrl is set
+  // once and never mutated; we strip the query to mirror req.path.
+  const originalUrl = req.originalUrl || req.url || '';
+  req._anomalyPath = originalUrl.split('?')[0];
   res.on('finish', () => {
     try {
       observe(req, res, startMs);
@@ -496,7 +506,9 @@ function observe(req, res, startMs) {
 
   const ip = req.ip || (req.socket && req.socket.remoteAddress) || 'unknown';
   const ua = req.headers && req.headers['user-agent'];
-  const lastPath = req.path;
+  // req._anomalyPath was captured at middleware entry time (see comment in
+  // middleware() above) — req.path would be the post-router-strip version.
+  const lastPath = req._anomalyPath || req.path;
   const status = res.statusCode;
 
   // Recent-auth tracker for the quarantine trigger. req.apiKey is set

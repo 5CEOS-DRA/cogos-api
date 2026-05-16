@@ -226,7 +226,10 @@ function enforceDailyCap(req, res, next) {
       kind: r.reason === 'token_cap' ? 'daily_quota_token' : 'daily_quota_request',
       subject_type: 'tenant',
       subject_value: String(tenantId),
-      path: req.path,
+      // req.baseUrl + req.path preserves the full URL inside a mounted
+      // express.Router (where req.path strips the mount prefix). For
+      // app-level middleware baseUrl is '' so the join is harmless.
+      path: (req.baseUrl || '') + req.path,
       status: 429,
       retry_after_s: retryAfterS,
       package_id: pkg.id,

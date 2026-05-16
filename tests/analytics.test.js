@@ -317,6 +317,91 @@ describe('analytics.tenantsActive', () => {
 });
 
 // ---------------------------------------------------------------------------
+// channelsBySignup
+// ---------------------------------------------------------------------------
+
+describe('analytics.channelsBySignup', () => {
+  const NOW = Date.now();
+  const RECENT = new Date(NOW - 60 * 1000).toISOString();
+  const ANCIENT = new Date(NOW - 60 * 24 * 60 * 60 * 1000).toISOString(); // 60d ago
+
+  test('groups by utm_source / utm_campaign / referer host', async () => {
+    writeKeys([
+      {
+        id: 'k1', tenant_id: 't1', issued_at: RECENT, active: true,
+        signup_source: {
+          utm_source: 'hn', utm_medium: 'showpost', utm_campaign: 'launch',
+          referer: 'https://news.ycombinator.com/item?id=1',
+        },
+      },
+      {
+        id: 'k2', tenant_id: 't2', issued_at: RECENT, active: true,
+        signup_source: {
+          utm_source: 'hn', utm_medium: 'comment', utm_campaign: 'launch',
+          referer: 'https://news.ycombinator.com/item?id=2',
+        },
+      },
+      {
+        id: 'k3', tenant_id: 't3', issued_at: RECENT, active: true,
+        signup_source: {
+          utm_source: 'twitter', utm_medium: 'organic', utm_campaign: 'launch',
+          referer: 'https://twitter.com/user',
+        },
+      },
+      {
+        id: 'k4', tenant_id: 't4', issued_at: RECENT, active: true,
+        signup_source: { referer: null, utm_source: null }, // direct
+      },
+      {
+        id: 'k5', tenant_id: 't5', issued_at: RECENT, active: true,
+        signup_source: null, // operator-issued, no attribution
+      },
+    ]);
+    const a = freshAnalytics();
+    const out = await a.channelsBySignup({ sinceMs: 0 });
+    expect(out.total).toBe(5);
+    expect(out.by_utm_source.hn).toBe(2);
+    expect(out.by_utm_source.twitter).toBe(1);
+    expect(out.by_utm_source.unknown).toBe(2); // k4 + k5
+    expect(out.by_utm_campaign.launch).toBe(3);
+    expect(out.by_referer_host['news.ycombinator.com']).toBe(2);
+    expect(out.by_referer_host['twitter.com']).toBe(1);
+    expect(out.by_referer_host.direct).toBeGreaterThanOrEqual(1);
+    expect(out.top_referers[0].count).toBe(2);
+  });
+
+  test('sinceMs filter excludes pre-window keys', async () => {
+    writeKeys([
+      { id: 'old', tenant_id: 'told', issued_at: ANCIENT, active: true,
+        signup_source: { utm_source: 'hn' } },
+      { id: 'new', tenant_id: 'tnew', issued_at: RECENT, active: true,
+        signup_source: { utm_source: 'hn' } },
+    ]);
+    const a = freshAnalytics();
+    const out = await a.channelsBySignup({ sinceMs: NOW - 7 * 24 * 60 * 60 * 1000 });
+    expect(out.total).toBe(1);
+    expect(out.by_utm_source.hn).toBe(1);
+  });
+
+  test('malformed referer URL bucket as unknown', async () => {
+    writeKeys([
+      { id: 'k1', tenant_id: 't1', issued_at: RECENT, active: true,
+        signup_source: { referer: 'not a real url' } },
+    ]);
+    const a = freshAnalytics();
+    const out = await a.channelsBySignup({ sinceMs: 0 });
+    expect(out.by_referer_host.unknown).toBe(1);
+  });
+
+  test('missing keys.json returns zero totals, no crash', async () => {
+    const a = freshAnalytics();
+    const out = await a.channelsBySignup({ sinceMs: 0 });
+    expect(out.total).toBe(0);
+    expect(out.top_referers).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // revenueSnapshot
 // ---------------------------------------------------------------------------
 

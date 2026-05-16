@@ -624,6 +624,81 @@ async function tenantsActive({ sinceMs } = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// channelsBySignup — distribution attribution from keys.signup_source
+// ---------------------------------------------------------------------------
+// Source: keys.json. Every free-tier key issued via POST /signup/free
+// carries a signup_source object (set in src/index.js since the
+// adopter-instrumentation merge). Pre-attribution keys + operator-
+// issued keys have signup_source: null and bucket as 'unknown'.
+//
+// Aggregation shape:
+//   {
+//     total: <int>,                          # all signups in window
+//     by_utm_source: { hn: 12, twitter: 3, unknown: 8, ... },
+//     by_utm_campaign: { launch: 15, ... },
+//     by_referer_host: { 'news.ycombinator.com': 12, 'direct': 4, ... },
+//     top_referers: [ { host, count }, ... ],  # top 20
+//     since_ms: <ms epoch>,
+//     source: 'keys.json',
+//   }
+//
+// Referer is reduced to host so /item?id=X and /item?id=Y collapse to
+// the same bucket. Direct (no referer header) → 'direct'. Malformed
+// referer → 'unknown'.
+async function channelsBySignup({ sinceMs } = {}) {
+  const cutoff = resolveSinceMs(sinceMs);
+  let records = [];
+  try {
+    const raw = fs.readFileSync(keysFile(), 'utf8');
+    records = JSON.parse(raw);
+    if (!Array.isArray(records)) records = [];
+  } catch (_e) { records = []; }
+
+  const byUtmSource = {};
+  const byUtmCampaign = {};
+  const byUtmMedium = {};
+  const byRefererHost = {};
+  let total = 0;
+
+  for (const r of records) {
+    if (!r || !r.issued_at) continue;
+    const ms = toMs(r.issued_at);
+    if (!Number.isFinite(ms) || ms < cutoff) continue;
+    total += 1;
+    const src = r.signup_source || null;
+    const us = (src && src.utm_source) || 'unknown';
+    const uc = (src && src.utm_campaign) || 'unknown';
+    const um = (src && src.utm_medium) || 'unknown';
+    byUtmSource[us] = (byUtmSource[us] || 0) + 1;
+    byUtmCampaign[uc] = (byUtmCampaign[uc] || 0) + 1;
+    byUtmMedium[um] = (byUtmMedium[um] || 0) + 1;
+    let host = 'direct';
+    if (src && src.referer) {
+      try {
+        host = new URL(src.referer).host || 'unknown';
+      } catch (_e) { host = 'unknown'; }
+    }
+    byRefererHost[host] = (byRefererHost[host] || 0) + 1;
+  }
+
+  const topReferers = Object.entries(byRefererHost)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 20)
+    .map(([host, count]) => ({ host, count }));
+
+  return {
+    total,
+    by_utm_source: byUtmSource,
+    by_utm_campaign: byUtmCampaign,
+    by_utm_medium: byUtmMedium,
+    by_referer_host: byRefererHost,
+    top_referers: topReferers,
+    since_ms: cutoff,
+    source: 'keys.json',
+  };
+}
+
+// ---------------------------------------------------------------------------
 // revenueSnapshot
 // ---------------------------------------------------------------------------
 // Source: keys.json + packages.json. We do NOT call the Stripe API in
@@ -724,6 +799,7 @@ module.exports = {
   honeypotsByPath,
   rateLimitsByDay,
   tenantsActive,
+  channelsBySignup,
   revenueSnapshot,
   summary,
   // Test hooks

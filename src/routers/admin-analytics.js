@@ -99,6 +99,16 @@ function makeAdminAnalyticsRouter({ adminAuth }) {
     }
   });
 
+  router.get('/channels', adminAuth, async (req, res) => {
+    try {
+      const sinceMs = parseSinceMs(req.query.since_ms);
+      res.json(await analytics.channelsBySignup({ sinceMs }));
+    } catch (e) {
+      logger.error('analytics_channels_failed', { error: e.message });
+      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
+    }
+  });
+
   router.get('/revenue', adminAuth, (_req, res) => {
     try {
       res.json(analytics.revenueSnapshot());

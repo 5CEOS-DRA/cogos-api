@@ -986,6 +986,28 @@ function createApp() {
         }
       }
 
+      // Channel attribution. Captures referer + UTM params + user-agent
+      // so the operator can answer "which distribution channel brings
+      // devs". Truthful: a curl-direct signup has no referer and the
+      // signup_source object documents that absence rather than faking
+      // a source. Length-capped to avoid pathological inputs growing
+      // keys.json. UTM params come from query string OR body (some
+      // analytics tools post them as form fields). All fields optional.
+      const trunc = (v, n) => (typeof v === 'string' ? v.slice(0, n) : null);
+      const q = req.query || {};
+      const b = req.body || {};
+      const signupSource = {
+        referer: trunc(req.headers['referer'] || req.headers['referrer'], 512),
+        ua: trunc(req.headers['user-agent'], 256),
+        ip: req.ip || null,
+        utm_source:   trunc(q.utm_source   || b.utm_source,   128),
+        utm_medium:   trunc(q.utm_medium   || b.utm_medium,   128),
+        utm_campaign: trunc(q.utm_campaign || b.utm_campaign, 128),
+        utm_content:  trunc(q.utm_content  || b.utm_content,  128),
+        utm_term:     trunc(q.utm_term     || b.utm_term,     128),
+        ts: new Date().toISOString(),
+      };
+
       // Mint a fresh free-tier key. tenant_id is `free-<random>` so each
       // visitor gets an isolated tenant (no shared-quota collision). The
       // bearer scheme keeps the issued-on-form-submit UX simple — no
@@ -997,11 +1019,16 @@ function createApp() {
         tier: 'free',
         package_id: 'free',
         label: email ? `free-signup:${email}` : 'free-signup',
+        signup_source: signupSource,
       });
 
       logger.info('signup_free_issued', {
         tenant_id: tenantId,
         has_email: !!email,
+        utm_source: signupSource.utm_source,
+        utm_medium: signupSource.utm_medium,
+        utm_campaign: signupSource.utm_campaign,
+        referer_present: !!signupSource.referer,
       });
 
       res.type('html').send(landing.freeSignupHtml({

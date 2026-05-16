@@ -144,6 +144,69 @@ async function forwardViaSES(row) {
   });
 }
 
+// Sibling of forwardEmail() for arbitrary operator-facing notifications
+// (first-call adoption, key-quarantine alerts, etc.). Reuses the SES
+// SigV4 path so we don't grow a second outbound-mail vendor. Returns
+// the same {sent, reason, transport} shape forwardEmail() returns.
+//
+// Best-effort: failures are returned, never thrown. Caller decides
+// whether a missed notification is an alert or a log line.
+async function sendOperatorEmail({ subject, body }) {
+  const region = process.env.AWS_SES_REGION || process.env.AWS_REGION;
+  const accessKey = process.env.AWS_ACCESS_KEY_ID;
+  const secretKey = process.env.AWS_SECRET_ACCESS_KEY;
+  if (!region || !accessKey || !secretKey) {
+    return {
+      sent: false,
+      reason: 'AWS SES env vars not configured',
+      transport: null,
+    };
+  }
+  const fromAddress = process.env.AWS_SES_FROM || 'notify@5ceos.com';
+  const payload = {
+    FromEmailAddress: fromAddress,
+    Destination: { ToAddresses: [NOTIFY_TO] },
+    Content: {
+      Simple: {
+        Subject: { Data: String(subject || '[cogos] notification').slice(0, 200), Charset: 'UTF-8' },
+        Body: { Text: { Data: String(body || ''), Charset: 'UTF-8' } },
+      },
+    },
+  };
+  const reqBody = JSON.stringify(payload);
+  const host = `email.${region}.amazonaws.com`;
+  const apiPath = '/v2/email/outbound-emails';
+  const headers = sigv4SignedHeaders({
+    service: 'ses',
+    region, accessKey, secretKey,
+    method: 'POST', host, path: apiPath, body: reqBody,
+  });
+  return new Promise((resolve) => {
+    const req = https.request({
+      method: 'POST',
+      hostname: host,
+      path: apiPath,
+      headers,
+      timeout: 5000,
+    }, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        const text = Buffer.concat(chunks).toString('utf8');
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          resolve({ sent: true, status: res.statusCode, transport: 'ses' });
+        } else {
+          resolve({ sent: false, reason: `ses ${res.statusCode}: ${text.slice(0, 200)}`, transport: 'ses' });
+        }
+      });
+    });
+    req.on('error', (e) => resolve({ sent: false, reason: `ses error: ${e.message}`, transport: 'ses' }));
+    req.on('timeout', () => { req.destroy(); resolve({ sent: false, reason: 'ses timeout', transport: 'ses' }); });
+    req.write(reqBody);
+    req.end();
+  });
+}
+
 // AWS SigV4 signing for SES SESv2 POSTs. Returns the signed headers map.
 // Pure Node stdlib (crypto). No new deps. Verified against AWS-published
 // test vectors. The math:
@@ -320,5 +383,6 @@ module.exports = {
   // SigV4-signing code. Behavior unchanged; see the function comment
   // above for the priority order.
   forwardEmail,
+  sendOperatorEmail,
   _internal: { record, thankPage },
 };

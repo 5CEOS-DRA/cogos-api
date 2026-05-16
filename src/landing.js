@@ -474,7 +474,13 @@ python -m harness.summarize</code></pre>
 Tier shapes: <code>cogos-tier-b</code> (Qwen 2.5 3B, classification-shaped work) &middot; <code>cogos-tier-a</code> (Qwen 2.5 7B, narrative) &mdash; the router picks the right size of open-weight model per shape. Sufficient is sufficient.
 </p>
 
-${portalHref ? `<p style="margin-top:24px"><a class="cta" style="text-decoration:none;display:inline-block" href="${portalHref}">Manage subscription &rarr;</a></p>` : ''}
+<h2 style="color:#58a6ff;font-size:16px;margin-top:32px">Your dashboard</h2>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">
+Sign in any time with your API key as the password (same pattern as Stripe / Vercel / Fly). See live usage, browse your hash-chained audit slice, rotate or revoke keys.
+</p>
+<p style="margin:8px 0 0"><a class="cta" style="text-decoration:none;display:inline-block" href="/dashboard">Go to dashboard &rarr;</a></p>
+
+${portalHref ? `<p style="margin-top:16px"><a class="cta" style="text-decoration:none;display:inline-block;background:#21262d;border:1px solid #30363d" href="${portalHref}">Manage subscription &rarr;</a></p>` : ''}
 <p style="color:#6e7681;font-size:11px;margin-top:24px">
 Receipts at your billing email.${portalHref ? ` Cancel, change payment method, or download invoices from the link above.` : ` To manage your subscription, contact <a href="mailto:support@5ceos.com">support@5ceos.com</a>.`}
 </p>
@@ -563,10 +569,11 @@ a{color:#58a6ff}
 <h1>You already have a free-tier key</h1>
 <p>The email <code>${escapeHtml(email)}</code> already has a free-tier key issued against it. We don't mint a second one from this endpoint — that would turn /signup/free into a key-printing oracle for anyone who can guess an email.</p>
 <div class="warn">
-<strong>Lost your key?</strong> The plaintext is only displayed once, at issue time. We can't re-display it (we never stored it). To recover, email <a href="mailto:support@5ceos.com">support@5ceos.com</a> from the same address and an operator will issue a replacement.
+<strong>Lost your key?</strong> The plaintext is only displayed once, at issue time. We can't re-display it (we never stored it). Recover it yourself via <a href="/dashboard/forgot">/dashboard/forgot</a> &mdash; we email a one-time signed link to <code>${escapeHtml(email)}</code> that rotates to a fresh key. No operator intervention needed.
 </div>
+<p style="margin:16px 0 0"><a class="cta" href="/dashboard/forgot">Recover via email &rarr;</a></p>
 <p style="color:#8b949e;font-size:12px;margin-top:24px">
-Or upgrade to a paid tier (with proper key rotation + dashboard) from the <a href="/">homepage</a>.
+Still have your key? Sign in at <a href="/dashboard">/dashboard</a>. Or upgrade to a paid tier from the <a href="/">homepage</a>.
 </p>
 </main></body></html>`;
   }
@@ -636,6 +643,12 @@ const resp = await client.chat.completions.create({
   messages: [{ role: 'user', content: 'Hello' }],
 });
 console.log(resp.choices[0].message.content);</code></pre>
+
+<h2>Your dashboard</h2>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">
+After 24 hours your key + secret are still <em>valid</em>, just not re-displayed. Sign in to <a href="/dashboard">/dashboard</a> any time using your API key as the password &mdash; same pattern as Stripe / Vercel / Fly. From there: live usage counter, your hash-chained audit slice, rotate or revoke this key.
+</p>
+<p style="margin:8px 0 0"><a class="cta" style="text-decoration:none;display:inline-block;background:#238636;color:#fff" href="/dashboard">Go to dashboard &rarr;</a></p>
 
 <p style="color:#6e7681;font-size:11px;margin-top:24px">
 On the free tier you get Tier B (Qwen 2.5 3B, schema-locked, signed responses). For Tier A narrative work, upgrade from the <a href="/">homepage</a>.

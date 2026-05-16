@@ -181,6 +181,13 @@ function issue({
   stripe = null,
   scheme = 'bearer',
   expires_at_iso = null,
+  // Channel attribution: who/where did this key originate from? Captured
+  // at /signup/free POST (referer + UTM params + user-agent). Operator
+  // reads this via /admin/keys to answer "which distribution channel
+  // brings developers." Shape: { referer, ua, utm_source, utm_medium,
+  // utm_campaign, utm_content, utm_term, ip, ts } — all fields optional.
+  // Null = no attribution captured (e.g. operator-issued admin keys).
+  signup_source = null,
 } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
@@ -284,6 +291,7 @@ function issue({
     // within 60s, fail-closed mode only).
     quarantined_at: null,
     quarantine_reason: null,
+    signup_source: signup_source || null,
   };
   const records = readAll();
   records.push(record);
@@ -394,6 +402,22 @@ function updateStripeStatus(keyId, { status, active }) {
   r.stripe_updated_at = new Date().toISOString();
   writeAll(records);
   return true;
+}
+
+// Stamp first_call_at exactly once per key. Caller is expected to gate
+// with an in-memory Set so we don't pay the readAll/writeAll round-trip
+// on every chat-completion — see src/early-adopter.js. Returns the
+// previous value (null if this was the first stamp; ISO string if it
+// was already set, in which case the in-memory cache was stale).
+function markFirstCallAt(keyId, isoTs) {
+  const records = readAll();
+  const r = records.find((x) => x.id === keyId);
+  if (!r) return null;
+  const prev = r.first_call_at || null;
+  if (prev) return prev;
+  r.first_call_at = isoTs;
+  writeAll(records);
+  return null;
 }
 
 // Verify a presented bearer string. Returns the record if valid+active.
@@ -699,6 +723,7 @@ module.exports = {
   findById,
   findByStripeCustomer,
   updateStripeStatus,
+  markFirstCallAt,
   findByEd25519KeyId,
   touchLastUsed,
   normalizeAppId,

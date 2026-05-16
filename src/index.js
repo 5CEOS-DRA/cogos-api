@@ -26,9 +26,9 @@ const dashboard = require('./dashboard');
 const session = require('./session');
 const dailyCap = require('./daily-cap');
 const magicLink = require('./magic-link');
-const analytics = require('./analytics');
 const auditCheckpoint = require('./audit-checkpoint');
 const usageRollup = require('./usage-rollup');
+const { makeAdminAnalyticsRouter } = require('./routers/admin-analytics');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -1706,109 +1706,11 @@ function createApp() {
   });
 
   // ---- Operator analytics endpoints (X-Admin-Key gated) ----
-  //
   // Aggregated, time-series-shaped JSON the 5CEOs Management Console
-  // ("CogOS Analytics" tab) fetches to chart substrate activity. All
-  // endpoints are READ-ONLY — none of them write state, mint keys,
-  // call Stripe, or talk to anything off-host. Source data is the
-  // same JSONL/JSON the gateway already writes (usage.jsonl,
-  // anomalies.jsonl, notify-signups.jsonl, keys.json, packages.json).
-  //
-  // `since_ms` query parameter (optional): a unix-ms cutoff. Rows
-  // older than this are excluded. Defaults to "now − 30 days." Must
-  // be a non-negative integer; anything else falls back to the
-  // 30-day default (we deliberately don't 400 on garbage so a
-  // miswired dashboard can still render).
-  //
-  // Per-IP /admin/* rate limit (30/min, mounted upstream) still
-  // applies — these endpoints are not bypassable from the wire.
-  function parseSinceMs(q) {
-    if (q == null || q === '') return undefined;
-    const n = Number(q);
-    if (!Number.isFinite(n) || n < 0) return undefined;
-    return Math.floor(n);
-  }
-
-  app.get('/admin/analytics/summary', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      const out = await analytics.summary({ sinceMs });
-      res.json(out);
-    } catch (e) {
-      logger.error('analytics_summary_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/signups', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      res.json(await analytics.signupsByDay({ sinceMs }));
-    } catch (e) {
-      logger.error('analytics_signups_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/requests', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      const granularity = req.query.granularity === 'day' ? 'day' : 'hour';
-      res.json(await analytics.requestsByHour({ sinceMs, granularity }));
-    } catch (e) {
-      logger.error('analytics_requests_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/anomalies', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      res.json(await analytics.anomaliesByKind({ sinceMs }));
-    } catch (e) {
-      logger.error('analytics_anomalies_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/honeypots', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      res.json(await analytics.honeypotsByPath({ sinceMs }));
-    } catch (e) {
-      logger.error('analytics_honeypots_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/rate-limits', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      res.json(await analytics.rateLimitsByDay({ sinceMs }));
-    } catch (e) {
-      logger.error('analytics_rate_limits_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/tenants', adminAuth, async (req, res) => {
-    try {
-      const sinceMs = parseSinceMs(req.query.since_ms);
-      res.json(await analytics.tenantsActive({ sinceMs }));
-    } catch (e) {
-      logger.error('analytics_tenants_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
-
-  app.get('/admin/analytics/revenue', adminAuth, (_req, res) => {
-    try {
-      res.json(analytics.revenueSnapshot());
-    } catch (e) {
-      logger.error('analytics_revenue_failed', { error: e.message });
-      res.status(500).json({ error: { message: e.message, type: 'analytics_failed' } });
-    }
-  });
+  // ("CogOS Analytics" tab) fetches. READ-ONLY; per-IP /admin/* rate
+  // limit (30/min, mounted upstream) still applies. Implementation
+  // lives in src/routers/admin-analytics.js.
+  app.use('/admin/analytics', makeAdminAnalyticsRouter({ adminAuth }));
 
   return app;
 }

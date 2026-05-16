@@ -24,6 +24,11 @@ beforeEach(() => {
   process.env.ANOMALIES_FILE = path.join(tmpDir, 'anomalies.jsonl');
   process.env.NOTIFY_SIGNUPS_FILE = path.join(tmpDir, 'notify-signups.jsonl');
   process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
+  // src/usage-rollup.js reads daily rollup JSON from this directory.
+  // Without this override the real data/usage-rollup-*.json files
+  // (which exist in the repo) leak into analytics.requestsByHour and
+  // skew the counts. See: prod rollup files committed under data/.
+  process.env.USAGE_ROLLUP_DIR = tmpDir;
   jest.resetModules();
 });
 

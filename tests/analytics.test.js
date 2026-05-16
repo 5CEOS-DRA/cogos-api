@@ -210,17 +210,31 @@ describe('analytics.anomaliesByKind', () => {
 // ---------------------------------------------------------------------------
 
 describe('analytics.honeypotsByPath', () => {
-  test('returns by_path + total + a note documenting the data gap', async () => {
-    writeJsonl('anomalies.jsonl', [
-      { ts: new Date().toISOString(), kind: 'scanner_active', context: { last_path: '/.env' } },
-      { ts: new Date().toISOString(), kind: 'scanner_active', context: { last_path: '/.env' } },
-      { ts: new Date().toISOString(), kind: 'scanner_active', context: { last_path: '/wp-admin' } },
-    ]);
+  test('missing data/honeypots.jsonl → zeros + a note flagging the gap', async () => {
+    const a = freshAnalytics();
+    process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
+    const out = await a.honeypotsByPath({ sinceMs: 0 });
+    expect(out.note).toMatch(/does not exist/i);
+    expect(out.source).toMatch(/honeypots\.jsonl/);
+    expect(out.total).toBe(0);
+  });
+
+  test('reads from seeded honeypots.jsonl + aggregates by normalized_path', async () => {
+    process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
+    fs.writeFileSync(process.env.HONEYPOTS_FILE, [
+      JSON.stringify({ ts: new Date().toISOString(), path: '/.env',  normalized_path: '/.env',  method: 'GET', ip: '1.2.3.4', ua: 'curl', country: null }),
+      JSON.stringify({ ts: new Date().toISOString(), path: '/.ENV',  normalized_path: '/.env',  method: 'GET', ip: '1.2.3.5', ua: 'curl', country: null }),
+      JSON.stringify({ ts: new Date().toISOString(), path: '/wp-admin', normalized_path: '/wp-admin', method: 'GET', ip: '1.2.3.6', ua: 'curl', country: null }),
+    ].join('\n') + '\n');
     const a = freshAnalytics();
     const out = await a.honeypotsByPath({ sinceMs: 0 });
-    expect(out.note).toMatch(/not persisted/i);
-    expect(out.source).toMatch(/anomalies\.jsonl/);
-    expect(typeof out.total).toBe('number');
+    expect(out.total).toBe(3);
+    expect(out.by_path['/.env']).toBe(2);
+    expect(out.by_path['/wp-admin']).toBe(1);
+    // File exists with data → no `note` field.
+    expect(out.note).toBeUndefined();
+    // top_paths is sorted by count descending.
+    expect(out.top_paths[0]).toEqual({ path: '/.env', count: 2 });
   });
 });
 
@@ -229,15 +243,45 @@ describe('analytics.honeypotsByPath', () => {
 // ---------------------------------------------------------------------------
 
 describe('analytics.rateLimitsByDay', () => {
-  test('returns zeros + a note documenting in-memory state', async () => {
+  test('missing data/rate-limits.jsonl → zeros + a note flagging the gap', async () => {
+    process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
     const a = freshAnalytics();
     const out = await a.rateLimitsByDay({ sinceMs: 0 });
-    expect(out.by_reason.anomaly_block).toBe(0);
-    expect(out.by_reason.rate_limit).toBe(0);
-    expect(out.by_reason.daily_quota_exceeded).toBe(0);
-    expect(out.by_reason.quota_exceeded).toBe(0);
+    // Five known kinds are seeded to zero so a UI legend pre-render works.
+    expect(out.by_kind.rate_limit_ip).toBe(0);
+    expect(out.by_kind.rate_limit_tenant).toBe(0);
+    expect(out.by_kind.daily_quota_request).toBe(0);
+    expect(out.by_kind.daily_quota_token).toBe(0);
+    expect(out.by_kind.anomaly_block).toBe(0);
     expect(out.total).toBe(0);
-    expect(out.note).toMatch(/aren't persisted to disk/);
+    expect(out.note).toMatch(/does not exist/i);
+  });
+
+  test('reads from seeded rate-limits.jsonl + aggregates by kind + by_day', async () => {
+    process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
+    const today = new Date().toISOString();
+    fs.writeFileSync(process.env.RATE_LIMITS_FILE, [
+      JSON.stringify({ ts: today, kind: 'rate_limit_ip',       subject_type: 'ip',     subject_value: '1.2.3.4',   path: '/health',             status: 429, retry_after_s: 60, package_id: null }),
+      JSON.stringify({ ts: today, kind: 'rate_limit_ip',       subject_type: 'ip',     subject_value: '1.2.3.4',   path: '/health',             status: 429, retry_after_s: 60, package_id: null }),
+      JSON.stringify({ ts: today, kind: 'rate_limit_tenant',   subject_type: 'tenant', subject_value: 'tenant-x',  path: '/v1/chat/completions', status: 429, retry_after_s: 60, package_id: 'starter' }),
+      JSON.stringify({ ts: today, kind: 'daily_quota_request', subject_type: 'tenant', subject_value: 'tenant-y',  path: '/v1/chat/completions', status: 429, retry_after_s: 60, package_id: 'free' }),
+      JSON.stringify({ ts: today, kind: 'daily_quota_token',   subject_type: 'tenant', subject_value: 'tenant-y',  path: '/v1/chat/completions', status: 429, retry_after_s: 60, package_id: 'free' }),
+      JSON.stringify({ ts: today, kind: 'anomaly_block',       subject_type: 'ip',     subject_value: '4.5.6.7',   path: '/.env',                status: 429, retry_after_s: 300, package_id: null }),
+    ].join('\n') + '\n');
+    const a = freshAnalytics();
+    const out = await a.rateLimitsByDay({ sinceMs: 0 });
+    expect(out.total).toBe(6);
+    expect(out.by_kind.rate_limit_ip).toBe(2);
+    expect(out.by_kind.rate_limit_tenant).toBe(1);
+    expect(out.by_kind.daily_quota_request).toBe(1);
+    expect(out.by_kind.daily_quota_token).toBe(1);
+    expect(out.by_kind.anomaly_block).toBe(1);
+    // by_day is one bucket today with the kind breakdown rolled up.
+    expect(out.by_day.length).toBe(1);
+    expect(out.by_day[0].total).toBe(6);
+    expect(out.by_day[0].rate_limit_ip).toBe(2);
+    // File exists with data → no `note` field.
+    expect(out.note).toBeUndefined();
   });
 });
 

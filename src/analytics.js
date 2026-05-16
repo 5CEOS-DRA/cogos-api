@@ -62,6 +62,12 @@ function notifySignupsFile() {
 function keysFile() {
   return process.env.KEYS_FILE || path.join(DATA_DIR, 'keys.json');
 }
+function honeypotsFile() {
+  return process.env.HONEYPOTS_FILE || path.join(DATA_DIR, 'honeypots.jsonl');
+}
+function rateLimitsFile() {
+  return process.env.RATE_LIMITS_FILE || path.join(DATA_DIR, 'rate-limits.jsonl');
+}
 
 const DEFAULT_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -314,32 +320,33 @@ async function anomaliesByKind({ sinceMs } = {}) {
 // ---------------------------------------------------------------------------
 // honeypotsByPath
 // ---------------------------------------------------------------------------
-// DATA GAP: honeypot hits are logged at WARN level via src/logger.js
-// but NOT persisted to a structured file the way usage rows are. For
-// the v1 of operator analytics we approximate by extracting
-// anomaly rows whose context.last_path is a honeypot canary (via
-// honeypot.isHoneypotPath). This is a partial signal — an IP that
-// triggers anomaly fires has been hitting honeypot paths, but a
-// single honeypot probe that doesn't trip the scanner_active
-// threshold won't appear.
+// Source: data/honeypots.jsonl — one row per honeypot hit, appended by
+// src/honeypot.js via src/event-log.js. Aggregates count by
+// normalized_path (lower-cased + trailing-slash-stripped) so trivial
+// scanner variants (/.ENV, /.env/, /Wp-Admin) collapse into the same
+// bucket. Falls back to the raw `path` field if a row predates
+// normalized_path. On a fresh deploy with no file yet, returns zeros
+// and a `note` so the Management Console can render the section
+// without fabricating data.
 async function honeypotsByPath({ sinceMs } = {}) {
   const cutoff = resolveSinceMs(sinceMs);
-  let honeypotMod = null;
-  try { honeypotMod = require('./honeypot'); } catch { honeypotMod = null; }
+  const filePath = honeypotsFile();
+  const fileExists = fs.existsSync(filePath);
 
   const byPath = {};
   let total = 0;
 
-  const stats = await streamJsonl(anomaliesFile(), (row) => {
+  const stats = await streamJsonl(filePath, (row) => {
     const ms = toMs(row && row.ts);
     if (!Number.isFinite(ms) || ms < cutoff) return;
-    const lastPath = row && row.context && row.context.last_path;
-    if (typeof lastPath !== 'string' || !lastPath) return;
-    const isHoneypot = honeypotMod && typeof honeypotMod.isHoneypotPath === 'function'
-      ? honeypotMod.isHoneypotPath(lastPath)
-      : false;
-    if (!isHoneypot) return;
-    byPath[lastPath] = (byPath[lastPath] || 0) + 1;
+    // Prefer normalized_path so /.ENV and /.env/ collapse into /.env
+    // for the aggregation key. Fall back to the raw path for back-
+    // compat with any future row that omits the normalized field.
+    const key = (typeof row.normalized_path === 'string' && row.normalized_path)
+      ? row.normalized_path
+      : (typeof row.path === 'string' && row.path) ? row.path : null;
+    if (!key) return;
+    byPath[key] = (byPath[key] || 0) + 1;
     total += 1;
   });
 
@@ -348,39 +355,84 @@ async function honeypotsByPath({ sinceMs } = {}) {
     .sort((a, b) => b.count - a.count)
     .slice(0, 20);
 
-  return {
+  const out = {
     by_path: byPath,
     total,
     top_paths: topPaths,
-    source: 'anomalies.jsonl (filtered via honeypot.isHoneypotPath)',
+    source: 'honeypots.jsonl',
     since_ms: cutoff,
     skipped_lines: stats.skipped,
-    note: 'honeypot hits are logged at WARN level but not persisted to a dedicated file in v1; this section derives a partial signal from anomaly rows whose context.last_path matches honeypot.isHoneypotPath. A single probe that does not trip the scanner_active threshold will not appear. Future: persist honeypot hits to data/honeypots.jsonl for full coverage.',
   };
+  // Only emit a `note` when the file is missing — that's the genuine
+  // "no events yet" case (fresh deploy). When the file exists, the
+  // numbers are real and no caveat is needed.
+  if (!fileExists) {
+    out.note = 'data/honeypots.jsonl does not exist yet — no honeypot hits have been recorded in this deploy.';
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------
 // rateLimitsByDay
 // ---------------------------------------------------------------------------
-// DATA GAP: 429s emitted by src/rate-limit.js + src/daily-cap.js are
-// not persisted to disk in v1 — the per-IP + per-tenant token buckets
-// live in memory and reset on process restart. We surface zeros + a
-// note so the Management Console can render the section without
-// fabricating data.
+// Source: data/rate-limits.jsonl — one row per 429 emitted, appended by
+// src/rate-limit.js (per-IP + per-tenant fixed-window caps + anomaly-
+// fail-closed bans) and src/chat-api.js enforceDailyCap (per-(tenant,
+// app) daily request + token caps). Aggregates count by `kind` and by
+// UTC day so the Management Console can plot a stacked-area time-series.
+// On a fresh deploy with no file yet, returns zeros + a `note`.
 async function rateLimitsByDay({ sinceMs } = {}) {
   const cutoff = resolveSinceMs(sinceMs);
-  return {
-    by_reason: {
-      anomaly_block: 0,
-      rate_limit: 0,
-      daily_quota_exceeded: 0,
-      quota_exceeded: 0,
-    },
-    total: 0,
-    source: 'in-memory (src/rate-limit.js + src/daily-cap.js)',
-    since_ms: cutoff,
-    note: "rate-limit + daily-cap 429s aren't persisted to disk yet; this section returns counters from in-process anomaly + daily-cap state, which resets on restart. Future: emit a structured event to data/rate-limits.jsonl on every 429 so this section can return real time-series.",
+  const filePath = rateLimitsFile();
+  const fileExists = fs.existsSync(filePath);
+
+  // Seed every known kind so a Management Console that pre-renders the
+  // legend can show all five categories even when one has zero events.
+  const byKind = {
+    rate_limit_ip: 0,
+    rate_limit_tenant: 0,
+    daily_quota_request: 0,
+    daily_quota_token: 0,
+    anomaly_block: 0,
   };
+  const byDay = new Map();
+  let total = 0;
+
+  const stats = await streamJsonl(filePath, (row) => {
+    const ms = toMs(row && row.ts);
+    if (!Number.isFinite(ms) || ms < cutoff) return;
+    const kind = typeof row.kind === 'string' ? row.kind : 'unknown';
+    byKind[kind] = (byKind[kind] || 0) + 1;
+    const day = utcDay(ms);
+    if (!byDay.has(day)) {
+      byDay.set(day, {
+        date: day,
+        rate_limit_ip: 0,
+        rate_limit_tenant: 0,
+        daily_quota_request: 0,
+        daily_quota_token: 0,
+        anomaly_block: 0,
+        total: 0,
+      });
+    }
+    const b = byDay.get(day);
+    if (kind in b) b[kind] += 1;
+    b.total += 1;
+    total += 1;
+  });
+
+  const out = {
+    by_kind: byKind,
+    by_day: Array.from(byDay.values()).sort((a, b) => (a.date < b.date ? -1 : 1)),
+    total,
+    source: 'rate-limits.jsonl',
+    since_ms: cutoff,
+    skipped_lines: stats.skipped,
+  };
+  if (!fileExists) {
+    out.note = 'data/rate-limits.jsonl does not exist yet — no 429s have been recorded in this deploy.';
+  }
+  return out;
 }
 
 // ---------------------------------------------------------------------------

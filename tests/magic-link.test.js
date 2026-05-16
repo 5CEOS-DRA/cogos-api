@@ -25,6 +25,7 @@ const crypto = require('crypto');
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-magic-test-'));
 process.env.MAGIC_LINK_SECRET_FILE = path.join(tmpDir, '.magic-link-secret');
+process.env.MAGIC_LINK_CONSUMED_FILE = path.join(tmpDir, 'magic-link-consumed.json');
 
 afterAll(() => {
   try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_e) {}
@@ -290,5 +291,70 @@ describe('secret resolution priority', () => {
     const onDisk = fs.readFileSync(process.env.MAGIC_LINK_SECRET_FILE, 'utf8').trim();
     expect(onDisk).toBe(generated);
     process.env.COGOS_MAGIC_LINK_SECRET = 'b2'.repeat(32);
+  });
+});
+
+// =============================================================================
+describe('consumed-nonce persistence', () => {
+  test('a consumed nonce survives a process restart', () => {
+    const m1 = freshModule();
+    const { token, nonce } = m1.createToken({
+      tenant_id: 'tenant-X',
+      key_id: 'key-Y',
+      email: 'persist@example.com',
+    });
+    expect(m1.verifyToken(token)).toBeTruthy(); // first use consumes
+    expect(typeof nonce).toBe('string');
+    // The snapshot file is now on disk.
+    expect(fs.existsSync(process.env.MAGIC_LINK_CONSUMED_FILE)).toBe(true);
+
+    // Simulate restart: jest.resetModules() flushes the require cache.
+    // We deliberately do NOT call _test._reset() — that would unlink
+    // the file. Instead we re-require fresh and verify hydration.
+    jest.resetModules();
+    const m2 = require('../src/magic-link');
+    // Re-presenting the SAME token must now be rejected even though
+    // this is a "fresh" process — the file was rehydrated on the
+    // first verifyToken() call.
+    expect(m2.verifyToken(token)).toBeNull();
+  });
+
+  test('expired nonces are pruned at load time', () => {
+    // Hand-craft a snapshot file containing an already-expired nonce.
+    const ancient = Date.now() - 60 * 60 * 1000; // 1h ago, well past TTL
+    fs.writeFileSync(process.env.MAGIC_LINK_CONSUMED_FILE, JSON.stringify({
+      version: 1,
+      ts: new Date().toISOString(),
+      entries: [
+        { nonce: 'a'.repeat(32), exp_ms: ancient },
+      ],
+    }));
+    jest.resetModules();
+    const m = require('../src/magic-link');
+    // Touch the consumed map by minting + consuming a different token.
+    // After that touch, the stale entry should have been pruned.
+    const { token } = m.createToken({
+      tenant_id: 'tenant-prune',
+      key_id: 'k1',
+      email: 'prune@example.com',
+    });
+    expect(m.verifyToken(token)).toBeTruthy();
+    // Read the file back: it should contain only the freshly-consumed
+    // nonce, NOT the ancient one.
+    const after = JSON.parse(fs.readFileSync(process.env.MAGIC_LINK_CONSUMED_FILE, 'utf8'));
+    expect(after.entries.find((e) => e.nonce === 'a'.repeat(32))).toBeUndefined();
+    expect(after.entries.length).toBe(1);
+  });
+
+  test('malformed snapshot file does not crash; starts empty', () => {
+    fs.writeFileSync(process.env.MAGIC_LINK_CONSUMED_FILE, '{not json');
+    jest.resetModules();
+    const m = require('../src/magic-link');
+    const { token } = m.createToken({
+      tenant_id: 'tenant-corrupt',
+      key_id: 'k1',
+      email: 'c@example.com',
+    });
+    expect(m.verifyToken(token)).toBeTruthy();
   });
 });

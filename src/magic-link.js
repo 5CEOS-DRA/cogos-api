@@ -173,14 +173,77 @@ function _canonicalPayloadJson({ kind, tenant_id, key_id, email, nonce, exp_ms }
   return JSON.stringify(ordered);
 }
 
-// --- consumed-nonce LRU ------------------------------------------------------
+// --- consumed-nonce LRU + disk snapshot --------------------------------------
 
-// Map<nonce, true>. Map preserves insertion order; on cap we drop the
-// oldest. Single-use semantics: once verifyToken accepts a token, the
-// nonce is recorded and a second presentation returns null.
+// Map<nonce, exp_ms>. The value is the token's expiration epoch-ms so
+// load-time pruning can drop entries past their replay window. Map
+// preserves insertion order for LRU cap eviction.
+//
+// Persisted to data/magic-link-consumed.json on every consumption +
+// hydrated on first verifyToken() call. Without persistence a process
+// restart re-opens the replay window: a token already used could be
+// re-presented and accepted. The 15-min TTL still bounds the danger,
+// but a deploy + restart inside that window IS the attack scenario.
 const _consumed = new Map();
 
-function _markConsumed(nonce) {
+function _consumedFile() {
+  return process.env.MAGIC_LINK_CONSUMED_FILE
+    || path.join(process.cwd(), 'data', 'magic-link-consumed.json');
+}
+
+let _consumedLoaded = false;
+function _lazyLoadConsumed() {
+  if (_consumedLoaded) return;
+  _consumedLoaded = true;
+  const f = _consumedFile();
+  if (!fs.existsSync(f)) return;
+  let raw;
+  try { raw = fs.readFileSync(f, 'utf8'); }
+  catch (e) {
+    try { logger.warn('magic_link_consumed_load_failed', { error: e.message }); } catch (_e) {}
+    return;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); }
+  catch (e) {
+    try { logger.warn('magic_link_consumed_parse_failed', { error: e.message }); } catch (_e) {}
+    return;
+  }
+  if (!parsed || !Array.isArray(parsed.entries)) return;
+  const now = Date.now();
+  let restored = 0;
+  for (const entry of parsed.entries) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (typeof entry.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(entry.nonce)) continue;
+    if (typeof entry.exp_ms !== 'number' || !Number.isFinite(entry.exp_ms)) continue;
+    // Past-expiry entries can't replay anyway (verifyToken's exp check
+    // rejects them first), so dropping them at load time shrinks the
+    // working set without changing semantics.
+    if (entry.exp_ms <= now) continue;
+    _consumed.set(entry.nonce, entry.exp_ms);
+    restored += 1;
+  }
+  try { logger.info('magic_link_consumed_loaded', { restored }); } catch (_e) {}
+}
+
+function _persistConsumed() {
+  const f = _consumedFile();
+  const tmp = `${f}.${process.pid}.tmp`;
+  const payload = {
+    version: 1,
+    ts: new Date().toISOString(),
+    entries: Array.from(_consumed.entries()).map(([nonce, exp_ms]) => ({ nonce, exp_ms })),
+  };
+  try {
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    try { logger.warn('magic_link_consumed_persist_failed', { error: e.message }); } catch (_e) {}
+  }
+}
+
+function _markConsumed(nonce, exp_ms) {
   // Re-insert if already present so a successful verification refreshes
   // its LRU position. In practice the second-call path returns null
   // before reaching here, so this is mostly defensive.
@@ -192,10 +255,12 @@ function _markConsumed(nonce) {
     if (!oldestKey) break;
     _consumed.delete(oldestKey);
   }
-  _consumed.set(nonce, true);
+  _consumed.set(nonce, exp_ms);
+  _persistConsumed();
 }
 
 function _isConsumed(nonce) {
+  _lazyLoadConsumed();
   return _consumed.has(nonce);
 }
 
@@ -273,7 +338,7 @@ function verifyToken(token, { consume = true } = {}) {
   // in rapid succession can't slip through under a race (single-threaded
   // Node lets us treat this as atomic).
   if (_isConsumed(nonce)) return null;
-  if (consume) _markConsumed(nonce);
+  if (consume) _markConsumed(nonce, exp_ms);
 
   return { tenant_id, key_id, email, nonce, exp_ms };
 }
@@ -285,9 +350,13 @@ const _test = {
     _secretBuf = null;
     _secretSourceLogged = false;
     _consumed.clear();
+    _consumedLoaded = false;
+    try { fs.unlinkSync(_consumedFile()); } catch (_e) { /* missing is fine */ }
   },
   _resetConsumed() {
     _consumed.clear();
+    _consumedLoaded = false;
+    try { fs.unlinkSync(_consumedFile()); } catch (_e) { /* missing is fine */ }
   },
   _peekSecretHex() {
     const buf = _resolveSecret();

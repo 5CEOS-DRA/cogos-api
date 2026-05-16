@@ -32,8 +32,8 @@ function renderPricingPill(pkg) {
     <div class="price">${priceLabel}</div>
     <div class="price-sub">${quota.toLowerCase() === '0' ? 'unmetered' : quota + ' requests/mo'} · ${escapeHtml(tiers || '—')} · schema-locked decoding · deterministic at temp=0</div>
     ${desc ? `<div class="price-sub" style="margin-bottom:14px">${desc}</div>` : ''}
-    <form action="/signup?package=${encodeURIComponent(pkg.id)}" method="POST" style="margin:0">
-      <button class="cta" type="submit">Start →</button>
+    <form action="${pkg.id === 'free' ? '/signup/free' : '/signup?package=' + encodeURIComponent(pkg.id)}" method="POST" style="margin:0">
+      <button class="cta" type="submit">${pkg.id === 'free' ? 'Get my key' : 'Start →'}</button>
     </form>
   </div>`;
 }

@@ -741,6 +741,15 @@ function createApp() {
       const packageId = (req.query && req.query.package)
         || (req.body && req.body.package)
         || null;
+
+      // Free tier must never hit Stripe checkout -- Stripe asks for a card
+      // even on a $0 price. Reroute to the no-card path. 307 preserves the
+      // POST method + body so /signup/free still receives the email field.
+      if (packageId === 'free') {
+        logger.info('signup_free_reroute_from_paid_path', { package_id: packageId });
+        return res.redirect(307, '/signup/free');
+      }
+
       const session = await stripeMod.createCheckoutSession({ origin, packageId });
       logger.info('stripe_checkout_session_created', {
         session_id: session.id, package_id: packageId,

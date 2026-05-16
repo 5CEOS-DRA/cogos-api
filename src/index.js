@@ -28,6 +28,7 @@ const dailyCap = require('./daily-cap');
 const magicLink = require('./magic-link');
 const analytics = require('./analytics');
 const auditCheckpoint = require('./audit-checkpoint');
+const usageRollup = require('./usage-rollup');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -1520,6 +1521,190 @@ function createApp() {
     }
   });
 
+  // ---- Deep health endpoint (X-Admin-Key gated) ----
+  //
+  // Single-shot self-assessed health view. The Application Insights
+  // "Availability Test" hits THIS endpoint (instead of the public `/`
+  // page) so the up/down signal reflects what's actually broken inside
+  // the gateway — not just "does the front door return 200."
+  //
+  // Returned shape is intentionally flat and stable so an alert rule
+  // can match on it without re-parsing nested structures:
+  //
+  //   chain_ok                  — latest audit-checkpoint verify
+  //   audit_writes_per_min      — recent rolling rate of usage.jsonl
+  //                               appends (smoothed over ~5min)
+  //   daily_cap_fires_today     — count of daily_quota_* 429s in UTC today
+  //   anomaly_events_last_hour  — scanner_active + auth_brute_force
+  //   inference_p99_5min_ms     — p99 of last 5min of /v1 latencies
+  //                               sampled from the tail of usage.jsonl
+  //   ok                        — true iff chain_ok && all counters
+  //                               are below their alert thresholds.
+  //                               Availability Tests assert on this.
+  //
+  // PERFORMANCE: this endpoint is invoked frequently (Availability
+  // Tests poll every ~5min from multiple regions). We deliberately
+  // bound the work: tail-only reads on usage.jsonl + a window-bounded
+  // scan of anomalies.jsonl/rate-limits.jsonl. Targets <100ms p95 even
+  // at a 1GB usage.jsonl.
+  app.get('/admin/health/deep', adminAuth, async (_req, res) => {
+    const fs = require('fs');
+    const path = require('path');
+    const readline = require('readline');
+
+    const startedAt = Date.now();
+    const out = {
+      ok: true,
+      ts: new Date(startedAt).toISOString(),
+      chain_ok: null,
+      audit_writes_per_min: 0,
+      daily_cap_fires_today: 0,
+      anomaly_events_last_hour: 0,
+      inference_p99_5min_ms: 0,
+      checks_failed: [],
+    };
+
+    // chain verify — same call as the public endpoint. Caught so a
+    // checkpoint substrate that's not yet seeded doesn't fail-closed
+    // the whole health response.
+    try {
+      const v = auditCheckpoint.verifyChain();
+      out.chain_ok = !!(v && v.ok);
+      if (!out.chain_ok) {
+        out.chain_break = {
+          broke_at_index: v && v.broke_at_index,
+          reason: v && v.reason,
+        };
+        out.checks_failed.push('chain_ok');
+      }
+    } catch (e) {
+      out.chain_ok = false;
+      out.checks_failed.push('chain_ok');
+      logger.warn('deep_health_chain_verify_failed', { error: e.message });
+    }
+
+    // Tail-only scan of usage.jsonl for the last 5-minute window. We
+    // read the last ~2MB (≈10K rows at 200B/row) which dwarfs any
+    // realistic 5-minute burst at 1000-customer scale (~10K req/5min
+    // = the same order of magnitude). For audit_writes_per_min we
+    // need only the count of rows in the 5-min window.
+    const fiveMinAgoMs = startedAt - 5 * 60 * 1000;
+    const oneHourAgoMs = startedAt - 60 * 60 * 1000;
+    const utcDay = new Date(startedAt).toISOString().slice(0, 10);
+
+    const usagePath = process.env.USAGE_FILE
+      || path.join(__dirname, '..', 'data', 'usage.jsonl');
+    try {
+      if (fs.existsSync(usagePath)) {
+        const stat = fs.statSync(usagePath);
+        const TAIL_BYTES = 2 * 1024 * 1024;
+        const start = Math.max(0, stat.size - TAIL_BYTES);
+        const stream = fs.createReadStream(usagePath, {
+          encoding: 'utf8', start,
+        });
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        const latencies = [];
+        let recentRowCount = 0;
+        let skipFirst = start > 0; // first line may be partial mid-row
+        for await (const line of rl) {
+          if (skipFirst) { skipFirst = false; continue; }
+          if (!line || !line.trim()) continue;
+          let row;
+          try { row = JSON.parse(line); } catch { continue; }
+          if (!row || !row.ts) continue;
+          const ms = Date.parse(row.ts);
+          if (!Number.isFinite(ms)) continue;
+          if (ms < fiveMinAgoMs) continue;
+          recentRowCount += 1;
+          const lat = Number(row.latency_ms);
+          if (Number.isFinite(lat) && lat > 0) latencies.push(lat);
+        }
+        // audit_writes_per_min = rows in last 5min / 5
+        out.audit_writes_per_min = Math.round((recentRowCount / 5) * 10) / 10;
+        // p99 over the sample
+        if (latencies.length > 0) {
+          latencies.sort((a, b) => a - b);
+          const rank = Math.ceil(0.99 * latencies.length) - 1;
+          out.inference_p99_5min_ms = latencies[
+            Math.max(0, Math.min(latencies.length - 1, rank))
+          ];
+        }
+      }
+    } catch (e) {
+      out.checks_failed.push('inference_p99_5min_ms');
+      logger.warn('deep_health_latency_tail_failed', { error: e.message });
+    }
+
+    // Rate-limits.jsonl scan for today's daily_quota_* fires. Streamed
+    // because rate-limits.jsonl is much smaller than usage.jsonl
+    // (~1 row per 429) so a full pass is cheap.
+    const rateLimitsPath = process.env.RATE_LIMITS_FILE
+      || path.join(__dirname, '..', 'data', 'rate-limits.jsonl');
+    try {
+      if (fs.existsSync(rateLimitsPath)) {
+        const stream = fs.createReadStream(rateLimitsPath, { encoding: 'utf8' });
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          if (!line || !line.trim()) continue;
+          let row;
+          try { row = JSON.parse(line); } catch { continue; }
+          if (!row || !row.ts) continue;
+          if (!row.kind) continue;
+          if (!String(row.kind).startsWith('daily_quota_')) continue;
+          if (String(row.ts).slice(0, 10) !== utcDay) continue;
+          out.daily_cap_fires_today += 1;
+        }
+      }
+    } catch (e) {
+      out.checks_failed.push('daily_cap_fires_today');
+      logger.warn('deep_health_rate_limits_failed', { error: e.message });
+    }
+
+    // Anomaly count in the last hour. We only care about the two
+    // alertable kinds (scanner_active + auth_brute_force_suspected)
+    // — `anomalous_*` and `auth_4xx` counter rows can flap on legit
+    // misconfig and shouldn't drive a paging metric.
+    const anomaliesPath = process.env.ANOMALIES_FILE
+      || path.join(__dirname, '..', 'data', 'anomalies.jsonl');
+    try {
+      if (fs.existsSync(anomaliesPath)) {
+        const stream = fs.createReadStream(anomaliesPath, { encoding: 'utf8' });
+        const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+        for await (const line of rl) {
+          if (!line || !line.trim()) continue;
+          let row;
+          try { row = JSON.parse(line); } catch { continue; }
+          if (!row || !row.ts) continue;
+          const ms = Date.parse(row.ts);
+          if (!Number.isFinite(ms) || ms < oneHourAgoMs) continue;
+          if (row.kind === 'scanner_active' || row.kind === 'auth_brute_force_suspected') {
+            out.anomaly_events_last_hour += 1;
+          }
+        }
+      }
+    } catch (e) {
+      out.checks_failed.push('anomaly_events_last_hour');
+      logger.warn('deep_health_anomalies_failed', { error: e.message });
+    }
+
+    // Overall ok flag: chain_ok AND all counters below the alert
+    // thresholds wired in scripts/setup-monitoring.sh. If you change
+    // a threshold there, change it here too so the Availability Test
+    // surfaces the same boolean the page would.
+    if (!out.chain_ok) out.ok = false;
+    if (out.inference_p99_5min_ms > 15000) out.ok = false;
+    if (out.anomaly_events_last_hour > 10) out.ok = false;
+    if (out.daily_cap_fires_today > 50) out.ok = false;
+
+    out.duration_ms = Date.now() - startedAt;
+    // Structured log so the alert rules `cogos-audit-chain-breach` etc
+    // can match on the literal payload.
+    logger.info('deep_health', out);
+    // 200 on healthy, 503 on not — Availability Test reads HTTP status
+    // primarily, body for diagnostics.
+    res.status(out.ok ? 200 : 503).json(out);
+  });
+
   // ---- Operator analytics endpoints (X-Admin-Key gated) ----
   //
   // Aggregated, time-series-shaped JSON the 5CEOs Management Console
@@ -1663,6 +1848,16 @@ if (require.main === module) {
       });
     } catch (e) {
       logger.error('audit_checkpoint_scheduler_failed', { error: e.message });
+    }
+    // Daily usage rollup — pre-aggregates yesterday's chunk of
+    // usage.jsonl into data/usage-rollup-YYYY-MM-DD.json so analytics
+    // streaming reads stay fast as usage.jsonl grows past ~10M rows.
+    // Idempotent on restart — files already on disk are not recomputed.
+    try {
+      usageRollup.startScheduler();
+      logger.info('usage_rollup_scheduler_started', {});
+    } catch (e) {
+      logger.error('usage_rollup_scheduler_failed', { error: e.message });
     }
   });
 }

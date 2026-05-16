@@ -11,12 +11,6 @@ const usage = require('./usage');
 const stripeMod = require('./stripe');
 const packages = require('./packages');
 const landing = require('./landing');
-const legal = require('./legal');
-const whitepaper = require('./whitepaper');
-const demo = require('./demo');
-const cookbook = require('./cookbook');
-const attestation = require('./attestation');
-const trust = require('./trust');
 const honeypot = require('./honeypot');
 const anomaly = require('./anomaly');
 const { rateLimitByIp, rateLimitByTenant } = require('./rate-limit');
@@ -30,6 +24,7 @@ const auditCheckpoint = require('./audit-checkpoint');
 const usageRollup = require('./usage-rollup');
 const { makeAdminAnalyticsRouter } = require('./routers/admin-analytics');
 const { makeAuditCheckpointRouter } = require('./routers/audit-checkpoint');
+const { makePublicContentRouter } = require('./routers/public-content');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -161,96 +156,11 @@ function createApp() {
   app.use(express.urlencoded({ extended: false, limit: '4kb' }));
   app.set('trust proxy', 1);
 
-  // ---- Public health (no auth) ----
-  // Content-negotiated: browsers get an HTML heartbeat page with a
-  // pulsing green check; monitors / curl / supertest get the JSON.
-  app.get('/health', (req, res) => {
-    const data = {
-      status: 'ok',
-      service: 'cogos-api',
-      version: '0.1.0',
-      uptime_s: Math.round(process.uptime()),
-      timestamp: new Date().toISOString(),
-    };
-    // Order matters: res.format() picks the FIRST key whose MIME matches
-    // the request's Accept. Browsers send `text/html,...` explicitly so
-    // they hit the HTML branch; curl, monitors, and supertest send `*/*`
-    // (or omit Accept entirely) and fall through to the JSON branch.
-    res.format({
-      'application/json': () => res.json(data),
-      'text/html': () => res.type('html').send(landing.healthHtml(data)),
-      default: () => res.json(data),
-    });
-  });
-
-  // ---- Public landing + signup + success/cancel ----
-  app.get('/', (_req, res) => {
-    res.type('html').send(landing.renderLandingHtml(packages.list()));
-  });
-  app.get('/cancel', (_req, res) => res.type('html').send(landing.CANCEL_HTML));
-
-  // ---- Public: cosign verification pubkey (no auth) ----
-  // Customers + auditors fetch this to verify cosigned container images:
-  //   cosign verify --key https://cogos.5ceos.com/cosign.pub <image>
-  // Source: COSIGN_PUBKEY_PEM env (full PEM string) or COSIGN_PUBKEY_FILE
-  // (path to a PEM file readable by the container). Both unset → 404 with
-  // a hint so the URL doesn't 500.
-  app.get('/cosign.pub', (_req, res) => {
-    const pem = process.env.COSIGN_PUBKEY_PEM
-      || (process.env.COSIGN_PUBKEY_FILE
-          ? (() => { try { return require('node:fs').readFileSync(process.env.COSIGN_PUBKEY_FILE, 'utf8'); } catch { return null; } })()
-          : null);
-    if (!pem) {
-      return res.status(404).type('text/plain').send(
-        '# cosign pubkey not yet published\n'
-        + '# Set COSIGN_PUBKEY_PEM or COSIGN_PUBKEY_FILE on the deployed container.\n'
-      );
-    }
-    res.type('text/plain').send(pem);
-  });
-
-  // ---- Public: per-response attestation pubkey (no auth) ----
-  // Companion to /cosign.pub for the new attestation-token primitive.
-  // Customers fetch this PEM to verify the X-Cogos-Attestation header on
-  // any /v1/* response. The keypair is ephemeral per process — a container
-  // restart rotates it. Customers re-fetch on each verification cycle the
-  // same way they trust TLS cert rotation. The X-Cogos-Attestation-Kid
-  // header echoes the first 16 hex of sha256(pem) so a customer with
-  // multiple stale receipts can match each one to its issuing key.
-  //
-  // Source: in-process Ed25519 keypair generated at first signing call.
-  // See src/attestation.js for why we deliberately do NOT load a
-  // long-lived signing key here.
-  app.get('/attestation.pub', (_req, res) => {
-    res.set('X-Cogos-Attestation-Kid', attestation.getAttestationKid());
-    res.type('text/plain').send(attestation.getAttestationPubkey());
-  });
-
-  // ---- Legal pages (required for Stripe activation, public, no auth) ----
-  app.get('/terms', (_req, res) => res.type('html').send(legal.termsHtml()));
-  app.get('/privacy', (_req, res) => res.type('html').send(legal.privacyHtml()));
-  app.get('/aup', (_req, res) => res.type('html').send(legal.aupHtml()));
-  // Enterprise-grade addenda — templates only, counsel review required.
-  app.get('/dpa', (_req, res) => res.type('html').send(legal.dpaHtml()));
-  app.get('/baa', (_req, res) => res.type('html').send(legal.baaHtml()));
-  app.get('/gdpr', (_req, res) => res.type('html').send(legal.gdprArt28Html()));
-  app.get('/sub-processors', (_req, res) => res.type('html').send(legal.subProcessorsHtml()));
-  app.get('/whitepaper', (_req, res) => res.type('html').send(whitepaper.whitepaperHtml()));
-  app.get('/demo', (_req, res) => res.type('html').send(demo.demoHtml()));
-  app.get('/cookbook', (_req, res) => res.type('html').send(cookbook.cookbookHtml()));
-
-  // ---- Trust / transparency dashboard (public, no auth) ----
-  // Modeled on trust.salesforce.com. Every claim on the page is backed by
-  // data this process can prove from env + process state, or mirrored from
-  // SECURITY.md §3. We never fabricate uptime, advisories, or pentest data:
-  // if the source data isn't present, the page renders an honest placeholder.
-  app.get('/trust', (_req, res) => {
-    // healthOk reflects whether *this* process can serve traffic — it's true
-    // here by definition (we're servicing the request). A future health-aware
-    // probe could flip this to 'degraded' on partial-failure signals.
-    const state = trust.buildTrustState({ healthOk: true });
-    res.type('html').send(trust.trustHtml(state));
-  });
+  // ---- Public read-only surface (no auth) ----
+  // /health, /, /cancel, /cosign.pub, /attestation.pub, /terms, /privacy,
+  // /aup, /dpa, /baa, /gdpr, /sub-processors, /whitepaper, /demo,
+  // /cookbook, /trust. Implementation in src/routers/public-content.js.
+  app.use(makePublicContentRouter());
 
   // ---- Public hash-chain checkpoint endpoints (no auth) ----
   // Security Hardening Plan card #3 — global witness for per-(tenant,

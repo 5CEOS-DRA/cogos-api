@@ -12,6 +12,12 @@
 export { Cogos } from './client';
 export type { CogosClientOptions } from './client';
 
+export { Ed25519Signer } from './ed25519';
+export type { SignRequestParams } from './ed25519';
+
+export { unsealAuditRow } from './unseal';
+export type { UnsealedContent } from './unseal';
+
 export { verifyHmac, computeHmac } from './hmac';
 export { verifyAttestation, decodeAttestation, sha256Hex } from './attestation';
 export type { AttestationPayload } from './attestation';

@@ -1,17 +1,20 @@
 // Top-level Cogos client.
 //
-// new Cogos({apiKey, hmacSecret?, baseUrl?})
+// new Cogos({apiKey, hmacSecret?, baseUrl?, ed25519Signer?})
 //
 // On every /v1/* response:
 //   - If `hmacSecret` was provided, verify X-Cogos-Signature; throw
 //     SignatureMismatchError on failure.
 //   - If `verifyAttestation` is true (default), fetch /attestation.pub
-//     (cached) and verify X-Cogos-Attestation against the exact
+//     (cached per kid) and verify X-Cogos-Attestation against the exact
 //     response bytes; throw AttestationMismatchError on failure.
 //
-// Auth dispatch: bearer (`Authorization: Bearer <apiKey>`).
-// Ed25519 signed-request flow is added in a follow-up commit.
+// Auth dispatch:
+//   - If `ed25519Signer` is provided, every call uses
+//     `Authorization: CogOS-Ed25519 keyId=...,sig=...,ts=...`
+//   - Otherwise bearer: `Authorization: Bearer <apiKey>`
 
+import { Ed25519Signer } from './ed25519';
 import { rawRequest } from './http';
 import { verifyHmac } from './hmac';
 import { verifyAttestation } from './attestation';
@@ -38,6 +41,7 @@ export interface CogosClientOptions {
   apiKey?: string;
   hmacSecret?: string;
   baseUrl?: string;
+  ed25519Signer?: Ed25519Signer;
   verifyAttestation?: boolean;
   timeoutMs?: number;
   // Test hook: pin the attestation pubkey PEM so tests don't need to
@@ -96,11 +100,13 @@ function mapErrorFromResponse(
 
 export class Cogos {
   public readonly baseUrl: string;
-  protected readonly apiKey: string | null;
-  protected readonly hmacSecret: string | null;
-  protected readonly verifyAttestationDefault: boolean;
-  protected readonly defaultTimeoutMs: number;
-  protected cachedAttestationPubPem: string | null;
+  private readonly apiKey: string | null;
+  private readonly hmacSecret: string | null;
+  private readonly ed25519Signer: Ed25519Signer | null;
+  private readonly verifyAttestationDefault: boolean;
+  private readonly defaultTimeoutMs: number;
+  private cachedAttestationPubPem: string | null;
+  private cachedAttestationKid: string | null;
 
   public readonly chat: { completions: { create: (params: ChatCompletionCreateParams, opts?: RequestOptions) => Promise<ChatCompletion> } };
   public readonly models: { list: (opts?: RequestOptions) => Promise<ModelsList> };
@@ -111,12 +117,14 @@ export class Cogos {
     this.apiKey = opts.apiKey ?? null;
     this.hmacSecret = opts.hmacSecret ?? null;
     this.baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, '');
+    this.ed25519Signer = opts.ed25519Signer ?? null;
     this.verifyAttestationDefault = opts.verifyAttestation !== false;
     this.defaultTimeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this.cachedAttestationPubPem = opts.attestationPubPem ?? null;
+    this.cachedAttestationKid = null;
 
-    if (!this.apiKey) {
-      throw new Error('Cogos: apiKey required');
+    if (!this.apiKey && !this.ed25519Signer) {
+      throw new Error('Cogos: either apiKey or ed25519Signer required');
     }
 
     // Bind public methods as namespaced objects, mirroring the OpenAI
@@ -132,7 +140,7 @@ export class Cogos {
     this.keys = { rotate: this.rotateKey.bind(this) };
   }
 
-  protected async createChatCompletion(
+  private async createChatCompletion(
     params: ChatCompletionCreateParams,
     opts: RequestOptions = {},
   ): Promise<ChatCompletion> {
@@ -144,7 +152,7 @@ export class Cogos {
     });
   }
 
-  protected async listModels(opts: RequestOptions = {}): Promise<ModelsList> {
+  private async listModels(opts: RequestOptions = {}): Promise<ModelsList> {
     return this.request<ModelsList>({
       method: 'GET',
       path: '/v1/models',
@@ -152,7 +160,7 @@ export class Cogos {
     });
   }
 
-  protected async readAudit(
+  private async readAudit(
     params: AuditReadParams = {},
     opts: RequestOptions = {},
   ): Promise<AuditReadResponse> {
@@ -168,7 +176,7 @@ export class Cogos {
     });
   }
 
-  protected async rotateKey(opts: RequestOptions = {}): Promise<RotateResponse> {
+  private async rotateKey(opts: RequestOptions = {}): Promise<RotateResponse> {
     return this.request<RotateResponse>({
       method: 'POST',
       path: '/v1/keys/rotate',
@@ -179,13 +187,7 @@ export class Cogos {
     });
   }
 
-  // Build the Authorization header for a single request. Overridable in
-  // subclasses (the ed25519 follow-up swaps to a signed scheme).
-  protected authorizationHeader(_method: string, _path: string, _bodyBytes: Buffer | null): string {
-    return `Bearer ${this.apiKey}`;
-  }
-
-  protected async request<T>(args: {
+  private async request<T>(args: {
     method: string;
     path: string;
     body?: unknown;
@@ -195,13 +197,23 @@ export class Cogos {
     const bodyBytes: Buffer | null = args.body !== undefined
       ? Buffer.from(JSON.stringify(args.body), 'utf8')
       : null;
+    const ts = Date.now();
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
       'Accept': 'application/json',
       'User-Agent': 'cogos-node/0.1.0',
       ...(args.opts.headers ?? {}),
     };
-    headers['Authorization'] = this.authorizationHeader(args.method, args.path, bodyBytes);
+    if (this.ed25519Signer) {
+      headers['Authorization'] = this.ed25519Signer.authorizationHeader({
+        method: args.method,
+        path: args.path,
+        ts,
+        body: bodyBytes,
+      });
+    } else if (this.apiKey) {
+      headers['Authorization'] = `Bearer ${this.apiKey}`;
+    }
     if (bodyBytes) headers['Content-Length'] = String(bodyBytes.length);
 
     const resp = await rawRequest({
@@ -215,7 +227,7 @@ export class Cogos {
     const retryAfterRaw = resp.headers['retry-after'];
     const retryAfter = retryAfterRaw ? Number(retryAfterRaw) : null;
 
-    // Parse JSON eagerly; on parse failure the body remains a string for
+    // Parse JSON eagerly; on parse failure the body remains a Buffer for
     // the error to surface.
     let parsed: unknown = null;
     let parseFailed = false;
@@ -282,8 +294,12 @@ export class Cogos {
     return parsed as T;
   }
 
-  // Fetch /attestation.pub. Cached after first fetch; clear via reinit.
-  protected async getAttestationPubkey(timeoutMs: number): Promise<string> {
+  // Fetch /attestation.pub. Cached per signer_kid; refetched when the
+  // header on a future response declares a different kid (handled in
+  // verifyAttestation via the AttestationMismatchError → caller can retry,
+  // but a more proactive refetch is left to future work — gateway key
+  // rotations are infrequent).
+  private async getAttestationPubkey(timeoutMs: number): Promise<string> {
     if (this.cachedAttestationPubPem) return this.cachedAttestationPubPem;
     const resp = await rawRequest({
       method: 'GET',

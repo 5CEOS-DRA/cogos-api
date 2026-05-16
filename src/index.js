@@ -25,6 +25,7 @@ const usageRollup = require('./usage-rollup');
 const { makeAdminAnalyticsRouter } = require('./routers/admin-analytics');
 const { makeAuditCheckpointRouter } = require('./routers/audit-checkpoint');
 const { makePublicContentRouter } = require('./routers/public-content');
+const { makeV1Router } = require('./routers/v1');
 
 // Strict security headers on every response. Strongest possible CSP given
 // our architecture: no third-party scripts, no SPA, no marketing tags. The
@@ -927,202 +928,17 @@ function createApp() {
     }
   });
 
-  // ---- Public chat-completions surface ----
-  // customerAuth = ed25519-first, bearer-fallback. Either scheme attaches
-  // req.apiKey on success; the chained handlers read req.apiKey.tenant_id
-  // without caring which substrate authenticated the request.
-  //
-  // rateLimitByTenant runs AFTER customerAuth so req.apiKey.tenant_id is
-  // populated. Default is 1000 req/min/tenant — generous for real workloads
-  // (16+ rps sustained) and tight enough that a leaked key can't single-
-  // handedly fill the inference queue. Per-IP limit already absorbed the
-  // anonymous-flood case upstream.
+  // ---- /v1/* customer-auth surface ----
+  // /v1/models, /v1/chat/completions, /v1/audit, /v1/keys/rotate.
+  // Implementation in src/routers/v1.js. tenantLimiter is constructed
+  // here (not inside the router) so a single instance is shared across
+  // every /v1/* route — its rate-limit buckets must not be duplicated.
   const tenantLimiter = rateLimitByTenant();
-  app.get('/v1/models', customerAuth, tenantLimiter, handleListModels);
-  app.post('/v1/chat/completions', customerAuth, tenantLimiter, enforceDailyCap, enforcePackage, handleChatCompletions);
-
-  // ---- Customer-facing audit query (Security Hardening Card #3) ----
-  // Returns the requesting tenant's hash-chained usage rows. Strictly
-  // tenant-scoped via req.apiKey.tenant_id — customer A can never see
-  // customer B's rows. `chain_ok` is the server-side verifyChain() result
-  // on the returned slice; customers re-run verification locally for
-  // independent assurance.
-  //
-  // PUBLIC-SCOPING NOTE: this endpoint exposes the per-tenant chain only.
-  // A future card will publish a GLOBAL head-hash (merkle aggregation of
-  // all tenant heads) to a public Azure Blob URL on an hourly cadence,
-  // letting any third party verify the entire log hasn't been rewritten.
-  // The public `/audit/checkpoint/<ts>` endpoint and Azure Blob
-  // integration are intentionally NOT built in this branch — they're
-  // a separate card in SECURITY_HARDENING_PLAN.md.
-  app.get('/v1/audit', customerAuth, tenantLimiter, (req, res) => {
-    const sinceMs = Number(req.query.since || 0);
-    const limitRaw = Number(req.query.limit || 100);
-    if (!Number.isFinite(sinceMs) || sinceMs < 0) {
-      return res.status(400).json({
-        error: { message: '`since` must be a non-negative unix-ms integer', type: 'invalid_request_error' },
-      });
-    }
-    if (!Number.isFinite(limitRaw) || limitRaw < 0) {
-      return res.status(400).json({
-        error: { message: '`limit` must be a non-negative integer', type: 'invalid_request_error' },
-      });
-    }
-    const limit = Math.min(1000, Math.max(0, Math.floor(limitRaw)));
-    const tenantId = req.apiKey && req.apiKey.tenant_id;
-    // app_id query param scopes the slice to a single app's chain. When
-    // omitted, the response is the interleaved cross-app view for the
-    // whole tenant — chain_ok is computed per-app and surfaced as
-    // chain_ok_by_app so the caller can verify each app independently.
-    // Validate the query param shape against the same slug rules
-    // src/keys.js uses on issue. Invalid app_id → 400 (don't 200 with
-    // empty rows because that would silently hide a typo).
-    const rawAppId = req.query.app_id;
-    let scopedAppId = null; // null = cross-app
-    if (rawAppId != null && rawAppId !== '') {
-      try {
-        scopedAppId = keys.normalizeAppId(rawAppId);
-      } catch (e) {
-        return res.status(400).json({
-          error: { message: e.message, type: 'invalid_request_error' },
-        });
-      }
-    }
-
-    const rows = usage.readSlice({
-      tenant_id: tenantId,
-      app_id: scopedAppId,    // null = cross-app
-      since: sinceMs,
-      limit,
-    });
-
-    // Chain verification semantics:
-    //   - scoped (single app)  → one chain check on the rows as returned.
-    //   - cross-app (no scope) → per-app verification. The interleaved
-    //     row order is what the customer asked for; chain integrity is
-    //     proved by re-grouping per app under the hood.
-    // chain_ok is the AND of every app's per-chain result (cross-app
-    // case) or the single chain's result (scoped case) — keeps the
-    // legacy boolean useful for "should I trust this slice" wire checks.
-    let chainOk;
-    let chainBreak = null;
-    let chainOkByApp = null;
-    if (scopedAppId !== null) {
-      const single = usage.verifyChain(rows);
-      chainOk = single.ok;
-      if (!single.ok) {
-        chainBreak = {
-          broke_at_index: single.broke_at_index,
-          reason: single.reason,
-        };
-      }
-      chainOkByApp = { [scopedAppId]: single.ok };
-    } else {
-      const perApp = usage.verifyByApp(rows);
-      chainOkByApp = {};
-      let firstBreak = null;
-      for (const [app, result] of Object.entries(perApp)) {
-        chainOkByApp[app] = result.ok;
-        if (!result.ok && firstBreak === null) {
-          firstBreak = {
-            app_id: app,
-            broke_at_index: result.broke_at_index,
-            reason: result.reason,
-          };
-        }
-      }
-      chainOk = Object.values(chainOkByApp).every(Boolean);
-      if (!chainOk) chainBreak = firstBreak;
-    }
-    // next_cursor = ts (ms) of the last returned row, so the caller can
-    // page forward by passing it back as `since`. Null when no rows
-    // returned OR the slice didn't fill `limit` (no more rows to fetch).
-    let nextCursor = null;
-    if (rows.length === limit && rows.length > 0) {
-      const lastTs = Date.parse(rows[rows.length - 1].ts);
-      if (Number.isFinite(lastTs)) nextCursor = lastTs;
-    }
-    res.json({
-      rows,
-      next_cursor: nextCursor,
-      chain_ok: chainOk,
-      chain_break: chainBreak,
-      chain_ok_by_app: chainOkByApp,
-      app_id: scopedAppId, // echoes the scope; null = cross-app response
-      server_time_ms: Date.now(),
-    });
-  });
-
-  // ---- Customer-driven rotation (Security Hardening Card: key lifecycle) ----
-  //
-  // POST /v1/keys/rotate — customerAuth-gated (works with both bearer +
-  // ed25519). The caller MUST succeed authentication with their CURRENT
-  // key. We issue a new key of the same scheme (bearer → bearer
-  // plaintext; ed25519 → fresh ed25519 + x25519 keypair) inheriting
-  // tenant_id / app_id / tier / package_id and CRUCIALLY the parent's
-  // expires_at (rotation != renewal). The old record gets a 24h
-  // rotation_grace_until stamp; during the grace window both keys
-  // authenticate and the old key's responses carry X-Cogos-Key-Deprecated.
-  // After grace, verify() auto-revokes the old record on next touch.
-  //
-  // KNOWN GAP (TODO future card): an attacker who already has the old
-  // key can rotate it themselves — this protects against future leaks
-  // but not the leak that's already happened. A human-in-the-loop
-  // confirmation flow (email-the-original-customer-before-rotating)
-  // closes that hole and is a separate card.
-  //
-  // Response shape mirrors POST /admin/keys so customer SDKs / the
-  // cookbook recipe can share display logic.
-  app.post('/v1/keys/rotate', customerAuth, tenantLimiter, (req, res) => {
-    try {
-      const issued = keys.rotate(req.apiKey);
-      const {
-        plaintext, hmac_secret, private_pem, pubkey_pem, ed25519_key_id,
-        x25519_private_pem, x25519_pubkey_pem, record,
-        rotation_grace_until_iso, rotated_from_key_id,
-      } = issued;
-      logger.info('key_rotated', {
-        old_id: rotated_from_key_id,
-        new_id: record.id,
-        tenant_id: record.tenant_id,
-        app_id: record.app_id,
-        scheme: record.scheme,
-      });
-      const response = {
-        key_id: record.id,
-        tenant_id: record.tenant_id,
-        app_id: record.app_id,
-        tier: record.tier,
-        scheme: record.scheme,
-        issued_at: record.issued_at,
-        expires_at: record.expires_at,
-        rotated_from_key_id,
-        rotation_grace_until: rotation_grace_until_iso,
-        hmac_secret,
-        warning: `Old key remains valid until ${rotation_grace_until_iso}; `
-          + 'switch your client to the new key before then. Save the new '
-          + 'material now — it will not be shown again.',
-      };
-      if (record.scheme === 'bearer') {
-        response.api_key = plaintext;
-      } else {
-        response.ed25519_key_id = ed25519_key_id;
-        response.private_pem = private_pem;
-        response.pubkey_pem = pubkey_pem;
-        response.x25519_private_pem = x25519_private_pem;
-        response.x25519_pubkey_pem = x25519_pubkey_pem;
-      }
-      res.status(201).json(response);
-    } catch (e) {
-      logger.warn('key_rotate_failed', {
-        caller_id: req.apiKey && req.apiKey.id,
-        error: e.message,
-      });
-      res.status(400).json({
-        error: { message: e.message, type: 'rotation_failed' },
-      });
-    }
-  });
+  app.use('/v1', makeV1Router({
+    customerAuth, tenantLimiter,
+    handleListModels, handleChatCompletions,
+    enforceDailyCap, enforcePackage,
+  }));
 
   // ---- Admin: key issuance + listing (gated on X-Admin-Key) ----
   // TODO(week-1-finisher): the /admin/* routes below are slated for removal

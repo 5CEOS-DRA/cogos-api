@@ -403,6 +403,27 @@ First call may take 5&ndash;8s on cold start. Subsequent calls run in &lt;2s.
     "messages": [{"role":"user","content":"Hello"}]
   }'</code></pre>
 
+<h3 style="color:#c9d1d9;font-size:13px;margin:18px 0 6px">Or use the SDK</h3>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">
+Typed client, bearer auth, HMAC + attestation auto-verified. Raises/throws on tampering &mdash; impossible to ignore by accident. Source: <a href="https://github.com/5ceos/cogos-api/tree/main/sdks">sdks/</a>, MIT-licensed. <a href="/cookbook#sdks">More &rarr;</a>
+</p>
+<pre><code># Python — pip install cogos
+from cogos import Client
+client = Client(api_key="${apiKey || 'sk-cogos-XXXXXXX'}", hmac_secret="...")
+resp = client.chat.completions.create(
+    model="cogos-tier-b",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp["choices"][0]["message"]["content"])</code></pre>
+<pre><code>// Node — npm install cogos
+import { Cogos } from 'cogos';
+const client = new Cogos({ apiKey: '${apiKey || 'sk-cogos-XXXXXXX'}', hmacSecret: '...' });
+const resp = await client.chat.completions.create({
+  model: 'cogos-tier-b',
+  messages: [{ role: 'user', content: 'Hello' }],
+});
+console.log(resp.choices[0].message.content);</code></pre>
+
 <h2 style="color:#58a6ff;font-size:16px;margin-top:32px">What next</h2>
 <p style="color:#8b949e;font-size:12px;margin:0 0 12px">
 Three 30-second next steps to feel out what the substrate actually does:
@@ -594,6 +615,27 @@ Free tier: 100 requests/day, 1000 fallback tokens/day. Tier B (3B) only. Upgrade
     "model": "cogos-tier-b",
     "messages": [{"role":"user","content":"Hello"}]
   }'</code></pre>
+
+<h3 style="color:#c9d1d9;font-size:13px;margin:18px 0 6px">Or use the SDK</h3>
+<p style="color:#8b949e;font-size:12px;margin:0 0 8px">
+Typed client, bearer auth, HMAC + attestation auto-verified. Raises/throws on tampering &mdash; impossible to ignore by accident. Source: <a href="https://github.com/5ceos/cogos-api/tree/main/sdks">sdks/</a>, MIT-licensed. <a href="/cookbook#sdks">More &rarr;</a>
+</p>
+<pre><code># Python — pip install cogos
+from cogos import Client
+client = Client(api_key="${safeKey}", hmac_secret="...")
+resp = client.chat.completions.create(
+    model="cogos-tier-b",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(resp["choices"][0]["message"]["content"])</code></pre>
+<pre><code>// Node — npm install cogos
+import { Cogos } from 'cogos';
+const client = new Cogos({ apiKey: '${safeKey}', hmacSecret: '...' });
+const resp = await client.chat.completions.create({
+  model: 'cogos-tier-b',
+  messages: [{ role: 'user', content: 'Hello' }],
+});
+console.log(resp.choices[0].message.content);</code></pre>
 
 <p style="color:#6e7681;font-size:11px;margin-top:24px">
 On the free tier you get Tier B (Qwen 2.5 3B, schema-locked, signed responses). For Tier A narrative work, upgrade from the <a href="/">homepage</a>.

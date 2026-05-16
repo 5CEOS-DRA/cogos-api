@@ -27,6 +27,7 @@ const cryptoSign = require('./crypto-sign');
 const attestation = require('./attestation');
 const dailyCap = require('./daily-cap');
 const rateLimit = require('./rate-limit');
+const earlyAdopter = require('./early-adopter');
 
 // Resolve the chain head AFTER a usage row was just appended for this
 // (tenant_id, app_id). usage.record() doesn't return the row_hash (the
@@ -528,6 +529,13 @@ async function handleChatCompletions(req, res) {
     schema_name: schemaName(body.response_format),
     x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
   });
+
+  // Operator awareness: fire a one-shot notification on first successful
+  // chat completion for a tenant. In-memory dedup + atomic on-disk stamp
+  // make this safe to call on every request — same-tenant subsequent
+  // calls short-circuit at the Set check. Fire-and-forget SES; never
+  // blocks the response.
+  earlyAdopter.noteCall(req.apiKey, model);
 
   // Daily-cap token accounting. We already incremented the REQUEST counter
   // pre-flight in enforceDailyCap; here we update the TOKEN counter with

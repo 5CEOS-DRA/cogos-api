@@ -396,6 +396,22 @@ function updateStripeStatus(keyId, { status, active }) {
   return true;
 }
 
+// Stamp first_call_at exactly once per key. Caller is expected to gate
+// with an in-memory Set so we don't pay the readAll/writeAll round-trip
+// on every chat-completion — see src/early-adopter.js. Returns the
+// previous value (null if this was the first stamp; ISO string if it
+// was already set, in which case the in-memory cache was stale).
+function markFirstCallAt(keyId, isoTs) {
+  const records = readAll();
+  const r = records.find((x) => x.id === keyId);
+  if (!r) return null;
+  const prev = r.first_call_at || null;
+  if (prev) return prev;
+  r.first_call_at = isoTs;
+  writeAll(records);
+  return null;
+}
+
 // Verify a presented bearer string. Returns the record if valid+active.
 //
 // Rotation grace (2026-05-15):
@@ -699,6 +715,7 @@ module.exports = {
   findById,
   findByStripeCustomer,
   updateStripeStatus,
+  markFirstCallAt,
   findByEd25519KeyId,
   touchLastUsed,
   normalizeAppId,

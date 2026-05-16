@@ -209,7 +209,34 @@ function renderTiles(state) {
     <div class="tile-value"><a href="/v1/audit">/v1/audit</a></div>
     <div class="tile-sub">Every customer fetches their own hash-chained usage rows and re-verifies them locally — no need to trust our copy.</div>
   </div>
+  ${renderLatencyTiles(state.latency)}
 </div>`;
+}
+
+function renderLatencyTiles(latency) {
+  if (!latency) {
+    return `<div class="tile">
+    <div class="tile-label">API latency (p50 · p95 · p99)</div>
+    <div class="tile-value">no data yet</div>
+    <div class="tile-sub">Rollup empty for the last 7 days. Numbers appear here once paid + free traffic accrues. We don't fabricate latency percentiles.</div>
+  </div>`;
+  }
+  const fmt = (ms) => (ms == null ? '—' : `${ms} ms`);
+  return `<div class="tile">
+    <div class="tile-label">API latency · p50</div>
+    <div class="tile-value">${escapeHtml(fmt(latency.p50_ms))}</div>
+    <div class="tile-sub">Median end-to-end latency across all completions on ${escapeHtml(latency.as_of_date)}. ${escapeHtml(String(latency.request_count))} requests, ${escapeHtml(String(latency.sample_count))} latency samples.</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">API latency · p95</div>
+    <div class="tile-value">${escapeHtml(fmt(latency.p95_ms))}</div>
+    <div class="tile-sub">95th-percentile latency. Reservoir-sampled across the day; raw samples are summarized in <a href="/v1/audit">/v1/audit</a> per tenant.</div>
+  </div>
+  <div class="tile">
+    <div class="tile-label">API latency · p99</div>
+    <div class="tile-value">${escapeHtml(fmt(latency.p99_ms))}</div>
+    <div class="tile-sub">99th-percentile latency. Tail behavior. Spikes correlate with cold-start container scale events; warm path stays in the p50 band.</div>
+  </div>`;
 }
 
 function renderClaimsTable() {
@@ -475,6 +502,36 @@ function loadCheckpointChainStatus() {
   catch { return { ok: true, chain_length: 0, broke_at_index: null, reason: null }; }
 }
 
+// Read p50/p95/p99 latency from the usage rollup. Walks back up to 7 days
+// so a zero-traffic day doesn't blank the tiles. Returns null if no rollup
+// exists in the window -- the renderer shows an honest "no data yet"
+// placeholder rather than fabricating numbers. Source data is operator-
+// aggregated globals only (no prompt content, no per-customer attribution).
+function loadLatestLatency() {
+  try {
+    const usageRollup = require('./usage-rollup');
+    if (!usageRollup.readRollup) return null;
+    const now = new Date();
+    for (let i = 0; i < 7; i++) {
+      const d = new Date(now.getTime() - i * 24 * 60 * 60 * 1000);
+      const dateIso = d.toISOString().slice(0, 10);
+      const r = usageRollup.readRollup(dateIso);
+      if (r && r.globals && r.globals.requests > 0) {
+        const g = r.globals;
+        return {
+          p50_ms: g.p50_latency_ms != null ? Math.round(g.p50_latency_ms) : null,
+          p95_ms: g.p95_latency_ms != null ? Math.round(g.p95_latency_ms) : null,
+          p99_ms: g.p99_latency_ms != null ? Math.round(g.p99_latency_ms) : null,
+          request_count: g.requests || 0,
+          sample_count: Array.isArray(g.latency_samples) ? g.latency_samples.length : 0,
+          as_of_date: dateIso,
+        };
+      }
+    }
+  } catch { /* fall through */ }
+  return null;
+}
+
 function buildTrustState({ healthOk = true } = {}) {
   let pkgVersion = '0.1.0';
   try {
@@ -492,6 +549,7 @@ function buildTrustState({ healthOk = true } = {}) {
     advisories: [], // none published; do not fabricate
     pentestHistory: loadPentestHistory(),
     latestProbe: loadLatestProbe(),
+    latency: loadLatestLatency(),
     latestCheckpoint: loadLatestCheckpoint(),
     checkpointChain: loadCheckpointChainStatus(),
     renderedAt: new Date().toISOString(),

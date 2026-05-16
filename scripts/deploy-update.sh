@@ -60,7 +60,27 @@ if [ -z "${COSIGN_PASSWORD+set}" ] && [ -n "${COSIGN_KEY_FILE:-}" ]; then
 fi
 if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ]; then
   if command -v cosign &>/dev/null; then
-    COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" || echo "[deploy] WARN: cosign sign exited non-zero — proceeding without enforcement (week-0 additive)"
+    # Capture sign output + exit code so we can detect silent failures.
+    # Previous version swallowed the error and printed a one-line WARN;
+    # several deploys shipped unsigned because of stale shell env (a
+    # COSIGN_PASSWORD set to the wrong value from a prior command).
+    if COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" 2>&1 | tail -3; then
+      # Verify-after-sign: prove the signature is actually published in
+      # ACR before continuing. If the sign output looked fine but ACR
+      # rejected the upload, this catches it.
+      if cosign verify --key "${COSIGN_KEY_FILE%.key}.pub" "${NEW_IMAGE}" >/dev/null 2>&1 \
+         || cosign verify --key "https://cogos.5ceos.com/cosign.pub" "${NEW_IMAGE}" >/dev/null 2>&1; then
+        echo "[deploy] ✓ cosign signature verified on ${NEW_IMAGE}"
+      else
+        echo "[deploy] WARN: cosign sign appeared to succeed but verify FAILED — image will deploy UNSIGNED"
+        echo "[deploy]       Run manually after deploy completes:"
+        echo "[deploy]         COSIGN_PASSWORD=\"\" cosign sign --yes --key \"${COSIGN_KEY_FILE}\" \"${NEW_IMAGE}\""
+      fi
+    else
+      echo "[deploy] WARN: cosign sign exited non-zero — image will deploy UNSIGNED"
+      echo "[deploy]       Likely cause: stale COSIGN_PASSWORD in shell env. Try:"
+      echo "[deploy]         unset COSIGN_PASSWORD && bash scripts/deploy-update.sh"
+    fi
   else
     echo "[deploy] WARN: cosign not installed locally — skipping sign step. brew install cosign"
   fi

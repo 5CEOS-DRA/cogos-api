@@ -108,6 +108,42 @@ describe('POST /signup/free — happy path (public_signup=true)', () => {
     expect(match.tenant_id).toMatch(/^free-[0-9a-f]{16}$/);
   });
 
+  test('POST /signup/free captures signup_source (referer + UTM + ua + ip)', async () => {
+    const email = 'attribution@example.com';
+    const res = await request(app)
+      .post('/signup/free?utm_source=hn&utm_medium=showpost&utm_campaign=launch&utm_content=top-comment')
+      .set('Referer', 'https://news.ycombinator.com/item?id=12345')
+      .set('User-Agent', 'Mozilla/5.0 dev-test')
+      .type('form')
+      .send({ email });
+    expect(res.status).toBe(200);
+
+    const match = keys.list().find((k) => k.label === `free-signup:${email}`);
+    expect(match).toBeTruthy();
+    expect(match.signup_source).toBeTruthy();
+    expect(match.signup_source.referer).toBe('https://news.ycombinator.com/item?id=12345');
+    expect(match.signup_source.ua).toBe('Mozilla/5.0 dev-test');
+    expect(match.signup_source.utm_source).toBe('hn');
+    expect(match.signup_source.utm_medium).toBe('showpost');
+    expect(match.signup_source.utm_campaign).toBe('launch');
+    expect(match.signup_source.utm_content).toBe('top-comment');
+    expect(typeof match.signup_source.ts).toBe('string');
+  });
+
+  test('POST /signup/free without referer/UTM still records signup_source with null fields', async () => {
+    const email = 'no-attribution@example.com';
+    const res = await request(app)
+      .post('/signup/free')
+      .type('form')
+      .send({ email });
+    expect(res.status).toBe(200);
+    const match = keys.list().find((k) => k.label === `free-signup:${email}`);
+    expect(match.signup_source).toBeTruthy();
+    expect(match.signup_source.referer).toBeNull();
+    expect(match.signup_source.utm_source).toBeNull();
+    expect(typeof match.signup_source.ts).toBe('string');
+  });
+
   test('POST /signup/free twice with same email → second response is the already-exists page', async () => {
     const email = 'dupe@example.com';
     const first = await request(app).post('/signup/free').type('form').send({ email });

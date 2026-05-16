@@ -181,6 +181,13 @@ function issue({
   stripe = null,
   scheme = 'bearer',
   expires_at_iso = null,
+  // Channel attribution: who/where did this key originate from? Captured
+  // at /signup/free POST (referer + UTM params + user-agent). Operator
+  // reads this via /admin/keys to answer "which distribution channel
+  // brings developers." Shape: { referer, ua, utm_source, utm_medium,
+  // utm_campaign, utm_content, utm_term, ip, ts } — all fields optional.
+  // Null = no attribution captured (e.g. operator-issued admin keys).
+  signup_source = null,
 } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
@@ -284,6 +291,7 @@ function issue({
     // within 60s, fail-closed mode only).
     quarantined_at: null,
     quarantine_reason: null,
+    signup_source: signup_source || null,
   };
   const records = readAll();
   records.push(record);

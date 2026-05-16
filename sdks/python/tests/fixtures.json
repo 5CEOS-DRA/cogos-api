@@ -1,0 +1,55 @@
+{
+  "hmac": {
+    "hmac_secret": "hsec_test_DETERMINISTIC_32B_PADDED",
+    "body_utf8": "{\"object\":\"list\",\"data\":[{\"id\":\"cogos-tier-b\"}]}",
+    "expected_signature_hex": "ce101a90065671ed56b4fdba27f8f7ff35119628342500efdb89836343c199a2"
+  },
+  "ed25519_request": {
+    "private_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8g\n-----END PRIVATE KEY-----\n",
+    "public_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=\n-----END PUBLIC KEY-----\n",
+    "method": "POST",
+    "path": "/v1/chat/completions",
+    "ts": 1715706000000,
+    "body_utf8": "{\"model\":\"cogos-tier-b\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}",
+    "expected_signature_base64": "IjOH0tDGmvLWPH2r6XHAFPmAo6O6p9PAoxuuAEoATUJP5Et7pYsHLfyn9uGTvoD4kJpx/7wTdJSwvP3HRxKCCA==",
+    "expected_header_suffix": "keyId=kid-test,sig=IjOH0tDGmvLWPH2r6XHAFPmAo6O6p9PAoxuuAEoATUJP5Et7pYsHLfyn9uGTvoD4kJpx/7wTdJSwvP3HRxKCCA==,ts=1715706000000"
+  },
+  "attestation": {
+    "public_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAC0eCPnEJXdWb54rCccV27zifh7ZFYasHz5pOvNAtIEE=\n-----END PUBLIC KEY-----\n",
+    "revision": "test-revision-1",
+    "chain_head": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+    "ts": 1715706000000,
+    "response_body_utf8": "{\"object\":\"list\",\"data\":[{\"id\":\"cogos-tier-b\",\"object\":\"model\"}]}",
+    "request_method": "GET",
+    "request_path": "/v1/models",
+    "request_body_utf8": "",
+    "token": "eyJ2IjoxLCJyZXFfaGFzaCI6ImEzMjMzYmI1YjcxMjJiYmVjNDRmMzk5NGI0YzIzMTU1ODA4YjFkYTQ3OGJkOGY4NjA3MTEyYjQzNDRiYTIyNzgiLCJyZXNwX2hhc2giOiIyYmZkZWU2NTIzOGQ0ZDJjYmVhNDAxYjgyMTFkYWYwOTQ0ZTRmYzRiZDVlYjdlZjM4ODUzYWE0NjQ4NzYyYTlmIiwicmV2IjoidGVzdC1yZXZpc2lvbi0xIiwiY2hhaW5faGVhZCI6ImRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmZGVhZGJlZWZkZWFkYmVlZmRlYWRiZWVmZGVhZGJlZWYiLCJzaWduZXIiOiJjb2dvcy1hcGkiLCJzaWduZXJfa2lkIjoiZjFmOWY3NDEyYTY3NTY5NyIsInRzIjoxNzE1NzA2MDAwMDAwfQ.NjrbnBrfv0dM0rXVE3WIW_-MMH8kqyj3K8ozcoqM4_UjReNyyKLwPp7grL89h2VoJGnsce3i6R6Xo6N22unGAg"
+  },
+  "sealed_audit": {
+    "x25519_private_pem": "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VuBCIEIIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiI\n-----END PRIVATE KEY-----\n",
+    "x25519_public_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VuAyEAMNPIZaSPzrPWEYV3zy5fIo1v9phmJkdXeFslPLekgGo=\n-----END PUBLIC KEY-----\n",
+    "plaintext_utf8": "{\"request_id\":\"chatcmpl-abc123\",\"prompt_fingerprint\":\"sha256:deadbeefdeadbeef\",\"schema_name\":\"invoice_v1\"}",
+    "aad": {
+      "tenant_id": "alice",
+      "app_id": "_default",
+      "ts": "2026-05-14T00:00:00.000Z"
+    },
+    "row": {
+      "ts": "2026-05-14T00:00:00.000Z",
+      "tenant_id": "alice",
+      "app_id": "_default",
+      "key_id": "kid-test",
+      "model": "cogos-tier-b",
+      "status": "success",
+      "sealed": true,
+      "sealed_content": {
+        "v": 1,
+        "alg": "x25519-hkdf-aes-256-gcm",
+        "ciphertext_b64": "wQSp/3w8KvbFXbumqri0FJVnRgPAeVZ2+sWTYwgrgAs6HMj1hNRQU+pf22+82l3UIit5S/tdwP+UsnylNjCW32gKYIbph7eEyKRcnhX9tpgmaFkbfW/RAhI8Uu3HiKhK602vPU3Ahs1+ag==",
+        "nonce_b64": "L8v5Sa8o1FS4lDg4",
+        "ephemeral_pub_b64": "1l100H2jLgqFDz8gtqcId8UiRWVrhePMf2BBJaiTwkA=",
+        "tag_b64": "gvZc8yEmABJ13+z5qS4K1A=="
+      }
+    }
+  }
+}

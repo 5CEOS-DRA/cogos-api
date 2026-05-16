@@ -44,6 +44,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
+const usageRollup = require('./usage-rollup');
 
 const DATA_DIR = path.join(__dirname, '..', 'data');
 
@@ -201,11 +202,35 @@ async function signupsByDay({ sinceMs } = {}) {
 // requestsByHour
 // ---------------------------------------------------------------------------
 // Source: usage.jsonl (every /v1/chat/completions hits record() so each
-// line is one request). Bucketing strategy: floor each row's ts to the
-// hour (default) or day, accumulate counts + token sums + latency
-// samples per bucket. p50/p95 latency are computed via percentile()
-// once at the end (single pass, no streaming median trick needed at
-// 100MB scale).
+// line is one request) PLUS daily rollup index (src/usage-rollup.js).
+// Bucketing strategy: floor each row's ts to the hour (default) or day,
+// accumulate counts + token sums + latency samples per bucket. p50/p95
+// latency are computed via percentile() once at the end.
+//
+// ROLLUP CACHE PATH (added at scale): if a UTC date inside [cutoff, today]
+// has a pre-computed rollup file, we READ THAT FILE instead of streaming
+// usage.jsonl rows for that date. The rollup carries per-hour buckets
+// (granularity='hour') OR per-day globals (granularity='day') already
+// aggregated + a sampled latency array for percentile reconstruction.
+// usage.jsonl is still streamed for the in-progress UTC day (today) and
+// any days without a rollup yet. The streaming pass is restricted to
+// those dates by checking utcDay(ms) against the rollup-set; rows whose
+// date is covered by a rollup are skipped to avoid double-counting.
+//
+// Correctness: counts + token sums are exact (rollup is a deterministic
+// re-aggregation of the same rows). Percentiles are computed by merging
+// the sampled-latency arrays from each consumed rollup with the live
+// latency samples from the streamed days — this yields an honest
+// nearest-rank percentile over the union of samples (median-of-medians
+// is wrong, sample-merge is correct).
+//
+// The rollup is a CACHE — if a late-arriving row is appended for a date
+// that already has a rollup, the rollup's row_count will diverge from
+// the truth. computeMissingRollups() only writes rollups for COMPLETE
+// days (date < today UTC) so the only way to hit drift is an out-of-
+// order ts on a row appended AFTER the day boundary; in that case the
+// operator can force-recompute via computeDayRollup(date) and the
+// cache realigns.
 async function requestsByHour({ sinceMs, granularity = 'hour' } = {}) {
   const cutoff = resolveSinceMs(sinceMs);
   const gran = granularity === 'day' ? 'day' : 'hour';
@@ -218,10 +243,101 @@ async function requestsByHour({ sinceMs, granularity = 'hour' } = {}) {
   let totalErrors = 0;
   const allLatency = [];
 
+  // Compute the set of UTC dates we might cover with rollups. Only
+  // COMPLETE days (date < today UTC) can have rollups; today's data is
+  // streamed live.
+  const cutoffDay = new Date(cutoff).toISOString().slice(0, 10);
+  const today = new Date().toISOString().slice(0, 10);
+  const available = new Set(usageRollup.listAvailableRollups());
+  const rollupHits = []; // dates we actually consumed
+  const rollupDates = new Set();
+  for (const d of available) {
+    if (d < cutoffDay) continue; // outside window
+    if (d >= today) continue;    // never use a rollup for today
+    rollupDates.add(d);
+    rollupHits.push(d);
+  }
+
+  // Helper: fold a per-bucket aggregate from a rollup file into the
+  // working buckets[] map. Used for both granularity modes.
+  function mergeRollup(roll) {
+    if (!roll || typeof roll !== 'object') return;
+    if (gran === 'day') {
+      const ts_iso = `${roll.date}T00:00:00.000Z`;
+      if (!buckets.has(ts_iso)) {
+        buckets.set(ts_iso, {
+          ts_iso,
+          requests: 0,
+          prompt_tokens: 0,
+          completion_tokens: 0,
+          errors: 0,
+          _latency: [],
+        });
+      }
+      const b = buckets.get(ts_iso);
+      const g = roll.globals || {};
+      b.requests += Number(g.requests) || 0;
+      b.prompt_tokens += Number(g.prompt_tokens) || 0;
+      b.completion_tokens += Number(g.completion_tokens) || 0;
+      b.errors += Number(g.errors) || 0;
+      if (Array.isArray(g.latency_samples)) {
+        for (const v of g.latency_samples) b._latency.push(v);
+      }
+      totalRequests += Number(g.requests) || 0;
+      totalPrompt += Number(g.prompt_tokens) || 0;
+      totalCompletion += Number(g.completion_tokens) || 0;
+      totalErrors += Number(g.errors) || 0;
+      if (Array.isArray(g.latency_samples)) {
+        for (const v of g.latency_samples) allLatency.push(v);
+      }
+    } else {
+      // hour granularity — fan out the rollup's by_hour map.
+      const byHour = roll.by_hour || {};
+      const g = roll.globals || {};
+      for (const hh of Object.keys(byHour)) {
+        const ts_iso = `${roll.date}T${hh}:00:00.000Z`;
+        const hb = byHour[hh] || {};
+        if (!buckets.has(ts_iso)) {
+          buckets.set(ts_iso, {
+            ts_iso,
+            requests: 0,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            errors: 0,
+            _latency: [],
+          });
+        }
+        const b = buckets.get(ts_iso);
+        b.requests += Number(hb.requests) || 0;
+        b.prompt_tokens += Number(hb.prompt_tokens) || 0;
+        b.completion_tokens += Number(hb.completion_tokens) || 0;
+        b.errors += Number(hb.errors) || 0;
+        if (Array.isArray(hb.latency_samples)) {
+          for (const v of hb.latency_samples) b._latency.push(v);
+        }
+      }
+      totalRequests += Number(g.requests) || 0;
+      totalPrompt += Number(g.prompt_tokens) || 0;
+      totalCompletion += Number(g.completion_tokens) || 0;
+      totalErrors += Number(g.errors) || 0;
+      if (Array.isArray(g.latency_samples)) {
+        for (const v of g.latency_samples) allLatency.push(v);
+      }
+    }
+  }
+
+  for (const d of rollupHits) {
+    const roll = usageRollup.readRollup(d);
+    mergeRollup(roll);
+  }
+
+  // Stream usage.jsonl, SKIPPING rows whose date is covered by a rollup.
   const stats = await streamJsonl(usageFile(), (row) => {
     const ms = toMs(row && row.ts);
     if (!Number.isFinite(ms) || ms < cutoff) return;
     if (row.route && row.route !== '/v1/chat/completions') return;
+    const day = utcDay(ms);
+    if (rollupDates.has(day)) return; // covered by a rollup; skip
     const label = bucketLabel(ms);
     if (!buckets.has(label)) {
       buckets.set(label, {
@@ -276,7 +392,11 @@ async function requestsByHour({ sinceMs, granularity = 'hour' } = {}) {
       errors: totalErrors,
     },
     granularity: gran,
-    source: 'usage.jsonl',
+    source: rollupHits.length
+      ? `usage.jsonl + ${rollupHits.length} daily rollup(s)`
+      : 'usage.jsonl',
+    rollup_cache_hit: rollupHits.length > 0,
+    rollup_dates: rollupHits,
     since_ms: cutoff,
     skipped_lines: stats.skipped,
   };

@@ -16,7 +16,8 @@
     "verbose": true,
     "testPathIgnorePatterns": [
       "/node_modules/",
-      "/.claude/"
+      "/.claude/",
+      "/sdks/"
     ]
   },
   "dependencies": {

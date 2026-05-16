@@ -34,7 +34,99 @@
 // skew + half-day-overlap during day rollover. No setInterval — sweep
 // runs opportunistically inside incrementAndCheck().
 
+const fs = require('node:fs');
+const path = require('node:path');
 const logger = require('./logger');
+
+// On-disk snapshot of the buckets Map. Synchronously rewritten via
+// atomic tmp+rename on every successful increment so a process restart
+// doesn't reset counters mid-day. Hydrate on first call via lazyLoad().
+// Path is configurable for tests via DAILY_CAP_FILE env.
+//
+// Why sync, not async: we'd otherwise have a window where the bucket
+// updated in memory but the request response went out before the disk
+// write landed. Process restart in that window = a customer's quota
+// silently resets. Sync write is ~0.3ms for the small file sizes
+// involved (≤50k buckets * ~80 bytes each = ~4MB worst case; typical
+// deployments will see ≤a few hundred buckets per day = a few KB).
+//
+// Why JSON not JSONL: the buckets map IS the source of truth — there's
+// no append-only narrative we need to replay. A snapshot file is more
+// honest to that shape than a journal pretending to be an event log.
+function dailyCapFile() {
+  return process.env.DAILY_CAP_FILE
+    || path.join(process.cwd(), 'data', 'daily-cap.json');
+}
+
+let _loaded = false;
+function lazyLoad() {
+  if (_loaded) return;
+  _loaded = true;
+  const f = dailyCapFile();
+  if (!fs.existsSync(f)) return;
+  let raw;
+  try { raw = fs.readFileSync(f, 'utf8'); } catch (e) {
+    logger.warn('daily_cap_load_read_failed', { file: f, error: e.message });
+    return;
+  }
+  let parsed;
+  try { parsed = JSON.parse(raw); } catch (e) {
+    logger.warn('daily_cap_load_parse_failed', { file: f, error: e.message });
+    return;
+  }
+  if (!parsed || !Array.isArray(parsed.buckets)) {
+    logger.warn('daily_cap_load_shape_invalid', { file: f });
+    return;
+  }
+  // TTL prune at load — yesterday's buckets that survived a long restart
+  // gap should not come back to haunt today's counters.
+  const cutoff = Date.now() - DAILY_BUCKET_TTL_MS;
+  let restored = 0;
+  for (const b of parsed.buckets) {
+    if (!b || typeof b !== 'object') continue;
+    if (typeof b.lastTouchedMs !== 'number' || b.lastTouchedMs < cutoff) continue;
+    if (!b.tenant_id || !b.date) continue;
+    const key = bucketKey(b.tenant_id, b.app_id, b.date);
+    buckets.set(key, {
+      key,
+      tenant_id: String(b.tenant_id),
+      app_id: String(b.app_id || '_default'),
+      date: String(b.date),
+      requests: Number(b.requests) || 0,
+      fallback_tokens: Number(b.fallback_tokens) || 0,
+      lastTouchedMs: Number(b.lastTouchedMs),
+    });
+    restored += 1;
+  }
+  logger.info('daily_cap_loaded', { file: f, buckets: restored });
+}
+
+function persistSnapshot() {
+  const f = dailyCapFile();
+  const tmp = `${f}.${process.pid}.tmp`;
+  const payload = {
+    version: 1,
+    ts: new Date().toISOString(),
+    buckets: Array.from(buckets.values()).map((b) => ({
+      tenant_id: b.tenant_id,
+      app_id: b.app_id,
+      date: b.date,
+      requests: b.requests,
+      fallback_tokens: b.fallback_tokens,
+      lastTouchedMs: b.lastTouchedMs,
+    })),
+  };
+  try {
+    // Ensure the parent dir exists — tests use tmpdirs that may not
+    // have a data/ subdirectory; production already has data/ via
+    // Dockerfile but defensive mkdir keeps the code portable.
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(tmp, JSON.stringify(payload), { mode: 0o600 });
+    fs.renameSync(tmp, f);
+  } catch (e) {
+    logger.warn('daily_cap_persist_failed', { file: f, error: e.message });
+  }
+}
 
 // 36 hours: longer than 24h to catch clock-skew + a full day's worth of
 // in-flight rows during a midnight-UTC rollover, but short enough that
@@ -51,9 +143,9 @@ const MAX_BUCKETS = Number(process.env.DAILY_CAP_MAX_BUCKETS || 50_000);
 
 // In-memory store. Map preserves insertion order, which we use for LRU
 // eviction (delete + set re-inserts at the end → least-recent is at the
-// head). Process restart resets — this is acknowledged as a TODO; for the
-// free-tier ship the soft-reset on deploy is acceptable, and the monthly
-// quota still acts as the persistent stop.
+// head). Persisted to disk via persistSnapshot() on every successful
+// increment + hydrated on first call via lazyLoad(); a process restart
+// no longer resets the counters mid-day.
 const buckets = new Map();
 
 // ---------------------------------------------------------------------------
@@ -160,6 +252,7 @@ function getOrCreateBucket(tenantId, appId, dateIso, now) {
 // expected ordering: deny the call before we burn upstream tokens).
 function incrementAndCheck(tenantId, appId, opts = {}) {
   const now = Date.now();
+  lazyLoad();
   maybeSweep(now);
 
   const requestsNow = Number(opts.requests_now || 0);
@@ -186,6 +279,7 @@ function incrementAndCheck(tenantId, appId, opts = {}) {
 
   // Request cap evaluated first.
   if (requestCap !== null && requestCap !== undefined && b.requests > requestCap) {
+    persistSnapshot();
     return { ok: false, reason: 'request_cap', current, limits };
   }
   // Then token cap. "Over" semantics: STRICT GREATER THAN — a request that
@@ -195,9 +289,11 @@ function incrementAndCheck(tenantId, appId, opts = {}) {
   // POST-response (so the customer's response already left the wire) —
   // the NEXT request from this bucket will hit the same path and 429.
   if (tokenCap !== null && tokenCap !== undefined && b.fallback_tokens > tokenCap) {
+    persistSnapshot();
     return { ok: false, reason: 'token_cap', current, limits };
   }
 
+  persistSnapshot();
   return { ok: true, reason: null, current, limits };
 }
 
@@ -233,6 +329,13 @@ const _test = {
   _reset() {
     buckets.clear();
     lastSweepMs = 0;
+    // Also reset the lazy-load flag so a test that wants to start from
+    // a clean slate doesn't get yesterday's bucket file rehydrated.
+    _loaded = false;
+    // Best-effort: remove the snapshot file if it exists in the path
+    // env var. Tests should set DAILY_CAP_FILE to a tmpdir; production
+    // never calls _reset.
+    try { fs.unlinkSync(dailyCapFile()); } catch (_e) { /* missing is fine */ }
   },
   bucketCount() { return buckets.size; },
   // Surface internals for cap-aware tests without making them public API.

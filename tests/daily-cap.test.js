@@ -13,7 +13,17 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 
+// Point daily-cap's snapshot file at a tmpdir BEFORE requiring the
+// module — production data/daily-cap.json must not be touched by tests.
+const _testTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-daily-cap-test-'));
+process.env.DAILY_CAP_FILE = path.join(_testTmpDir, 'daily-cap.json');
+process.env.RATE_LIMITS_FILE = path.join(_testTmpDir, 'rate-limits.jsonl');
+
 const dailyCap = require('../src/daily-cap');
+
+afterAll(() => {
+  try { fs.rmSync(_testTmpDir, { recursive: true, force: true }); } catch (_e) {}
+});
 
 beforeEach(() => {
   dailyCap._test._reset();
@@ -362,5 +372,110 @@ describe('daily-cap: LRU bound', () => {
     }
     expect(dailyCap._test.bucketCount()).toBe(100);
     expect(dailyCap._test.bucketCount()).toBeLessThanOrEqual(dailyCap._test.MAX_BUCKETS);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Persistence — counters must survive a process restart so the free-tier
+// 100-req/day cap can't be reset by a deploy or a crash.
+// ---------------------------------------------------------------------------
+describe('daily-cap: snapshot persistence + hydrate on load', () => {
+  test('an increment writes data/daily-cap.json', () => {
+    dailyCap.incrementAndCheck('tenant-persist', 'app-x', {
+      requests_now: 3,
+      request_cap: 100,
+    });
+    const f = process.env.DAILY_CAP_FILE;
+    expect(fs.existsSync(f)).toBe(true);
+    const parsed = JSON.parse(fs.readFileSync(f, 'utf8'));
+    expect(parsed.version).toBe(1);
+    expect(Array.isArray(parsed.buckets)).toBe(true);
+    const ours = parsed.buckets.find((b) => b.tenant_id === 'tenant-persist');
+    expect(ours).toBeTruthy();
+    expect(ours.requests).toBe(3);
+  });
+
+  test('process restart hydrates from disk on next increment', () => {
+    // Round 1: rack up 50 of a 100-cap budget.
+    for (let i = 0; i < 50; i += 1) {
+      dailyCap.incrementAndCheck('tenant-restart', 'app-x', {
+        requests_now: 1,
+        request_cap: 100,
+      });
+    }
+    expect(dailyCap.getCounter('tenant-restart', 'app-x').requests).toBe(50);
+
+    // Simulate process restart: clear in-memory state + lazy-load flag,
+    // BUT leave the snapshot file on disk (we don't call unlink).
+    // _test._reset does both, but we want to keep the file — patch:
+    // re-require the module after clearing the in-memory map manually.
+    jest.resetModules();
+    // Re-require gives us a fresh module instance with empty in-memory
+    // buckets and _loaded=false; the file from round 1 is still on disk.
+    const dailyCapFresh = require('../src/daily-cap');
+
+    // Round 2: a single additional increment. Should see the previous
+    // 50 hydrated from disk and the new 1 added → 51.
+    const r = dailyCapFresh.incrementAndCheck('tenant-restart', 'app-x', {
+      requests_now: 1,
+      request_cap: 100,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.current.requests).toBe(51);
+  });
+
+  test('hydrate prunes stale buckets older than TTL', () => {
+    // Write a snapshot with one fresh bucket and one ancient bucket.
+    const ancient = Date.now() - 48 * 60 * 60 * 1000; // 48h ago
+    const fresh = Date.now() - 60 * 1000; // 1 min ago
+    const f = process.env.DAILY_CAP_FILE;
+    fs.writeFileSync(f, JSON.stringify({
+      version: 1,
+      ts: new Date().toISOString(),
+      buckets: [
+        {
+          tenant_id: 'tenant-stale', app_id: 'app-x',
+          date: '2026-01-01',
+          requests: 999, fallback_tokens: 0,
+          lastTouchedMs: ancient,
+        },
+        {
+          tenant_id: 'tenant-fresh', app_id: 'app-x',
+          date: '2026-05-16',
+          requests: 7, fallback_tokens: 0,
+          lastTouchedMs: fresh,
+        },
+      ],
+    }));
+    jest.resetModules();
+    const dailyCapFresh = require('../src/daily-cap');
+
+    // Touching tenant-stale should NOT rehydrate the 999 — it's
+    // older than the 36h TTL and was pruned at load time.
+    const r1 = dailyCapFresh.incrementAndCheck('tenant-stale', 'app-x', {
+      requests_now: 1,
+      request_cap: 100,
+    });
+    expect(r1.current.requests).toBe(1);
+
+    // tenant-fresh should rehydrate cleanly.
+    const r2 = dailyCapFresh.incrementAndCheck('tenant-fresh', 'app-x', {
+      requests_now: 1,
+      request_cap: 100,
+    });
+    expect(r2.current.requests).toBe(8);
+  });
+
+  test('malformed snapshot file does not crash — module starts empty', () => {
+    const f = process.env.DAILY_CAP_FILE;
+    fs.writeFileSync(f, '{not valid json');
+    jest.resetModules();
+    const dailyCapFresh = require('../src/daily-cap');
+    const r = dailyCapFresh.incrementAndCheck('tenant-corrupt', 'app-x', {
+      requests_now: 1,
+      request_cap: 100,
+    });
+    expect(r.ok).toBe(true);
+    expect(r.current.requests).toBe(1);
   });
 });

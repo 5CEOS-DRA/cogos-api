@@ -26,6 +26,7 @@ const packages = require('./packages');
 const cryptoSign = require('./crypto-sign');
 const attestation = require('./attestation');
 const dailyCap = require('./daily-cap');
+const rateLimit = require('./rate-limit');
 
 // Resolve the chain head AFTER a usage row was just appended for this
 // (tenant_id, app_id). usage.record() doesn't return the row_hash (the
@@ -213,6 +214,21 @@ function enforceDailyCap(req, res, next) {
       reason: r.reason,
       current: r.current,
       limits: r.limits,
+    });
+    // Persist daily-quota 429 for operator analytics. The kind splits on
+    // r.reason so the operator's "which dimension trips most" view can
+    // separate request_cap vs token_cap pressure.
+    //   reason === 'request_cap' → kind='daily_quota_request'
+    //   reason === 'token_cap'   → kind='daily_quota_token'
+    rateLimit.appendRateLimit({
+      ts: new Date().toISOString(),
+      kind: r.reason === 'token_cap' ? 'daily_quota_token' : 'daily_quota_request',
+      subject_type: 'tenant',
+      subject_value: String(tenantId),
+      path: req.path,
+      status: 429,
+      retry_after_s: retryAfterS,
+      package_id: pkg.id,
     });
     return res.status(429).json({
       error: {

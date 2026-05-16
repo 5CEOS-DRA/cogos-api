@@ -25,6 +25,7 @@ beforeEach(() => {
   process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
   process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
   process.env.ANOMALIES_FILE = path.join(tmpDir, 'anomalies.jsonl');
+  process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
   // Tiny limits so per-IP tests don't have to fire 100+ requests each.
   process.env.RATE_LIMIT_IP_PER_MIN = '5';
   process.env.RATE_LIMIT_TENANT_PER_MIN = '1000';
@@ -175,5 +176,32 @@ describe('rate-limit — env override', () => {
     expect(r2.status).toBe(200);
     expect(r3.status).toBe(429);
     // env restored in afterEach
+  });
+});
+
+describe('rate-limit — event-log persistence', () => {
+  test('per-IP 429 writes one row to RATE_LIMITS_FILE with kind=rate_limit_ip', async () => {
+    const { app } = freshPair();
+    // RATE_LIMIT_IP_PER_MIN=5; first 5 succeed, 6th 429s + appends a row.
+    for (let i = 0; i < 5; i += 1) {
+      // eslint-disable-next-line no-await-in-loop
+      await request(app).get('/health');
+    }
+    const blocked = await request(app).get('/health');
+    expect(blocked.status).toBe(429);
+    expect(fs.existsSync(process.env.RATE_LIMITS_FILE)).toBe(true);
+    const lines = fs.readFileSync(process.env.RATE_LIMITS_FILE, 'utf8')
+      .split('\n').filter((l) => l.trim());
+    expect(lines.length).toBeGreaterThanOrEqual(1);
+    const row = JSON.parse(lines[lines.length - 1]);
+    expect(row.kind).toBe('rate_limit_ip');
+    expect(row.subject_type).toBe('ip');
+    expect(typeof row.subject_value).toBe('string');
+    expect(row.status).toBe(429);
+    expect(typeof row.retry_after_s).toBe('number');
+    expect(row.retry_after_s).toBeGreaterThan(0);
+    expect(row.path).toBe('/health');
+    expect(row.package_id).toBe(null);
+    expect(typeof row.ts).toBe('string');
   });
 });

@@ -7,6 +7,11 @@
 // test in tests/api.test.js for the /v1/chat/completions middleware path.
 
 process.env.NODE_ENV = 'test';
+process.env.ADMIN_KEY = 'test-admin-key-very-long';
+
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const dailyCap = require('../src/daily-cap');
 
@@ -236,6 +241,106 @@ describe('daily-cap: getCounter', () => {
     const beforeCount = dailyCap._test.bucketCount();
     dailyCap.getCounter('nobody', 'noapp');
     expect(dailyCap._test.bucketCount()).toBe(beforeCount);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// enforceDailyCap 429 → event-log persistence
+// ---------------------------------------------------------------------------
+// Integration-style test: spin up an app, set a tier with daily_request_cap=1,
+// fire two requests, assert the 2nd 429 writes one row to RATE_LIMITS_FILE
+// with kind=daily_quota_request. The unit-level cap mechanics are covered
+// above; this case nails down the analytics-event side of the pipeline.
+describe('daily-cap: enforceDailyCap event-log persistence', () => {
+  let tmpDir;
+  let request;
+  let nock;
+  let createApp;
+  let packages;
+
+  beforeEach(() => {
+    // Pristine tmpdir per test so the rate-limits file starts empty.
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-dc-evt-test-'));
+    process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
+    process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
+    process.env.PACKAGES_FILE = path.join(tmpDir, 'packages.json');
+    process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
+    process.env.OLLAMA_URL = 'http://ollama.test';
+    jest.resetModules();
+    dailyCap._test._reset();
+    request = require('supertest');
+    nock = require('nock');
+    nock.disableNetConnect();
+    nock.enableNetConnect(/127\.0\.0\.1|localhost/);
+    createApp = require('../src/index').createApp;
+    packages = require('../src/packages');
+  });
+
+  afterEach(() => {
+    try { nock.cleanAll(); nock.enableNetConnect(); nock.restore(); } catch (_e) {}
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch (_e) {}
+    delete process.env.RATE_LIMITS_FILE;
+  });
+
+  test('429 from enforceDailyCap writes a row to RATE_LIMITS_FILE with kind=daily_quota_request', async () => {
+    const tierId = 'dc-evt-tier';
+    await packages.create({
+      id: tierId,
+      display_name: 'DC Evt',
+      monthly_usd: 0,
+      monthly_request_quota: 1000,
+      allowed_model_tiers: ['cogos-tier-b'],
+      daily_request_cap: 1,
+    });
+
+    nock('http://ollama.test')
+      .post('/api/chat')
+      .reply(200, {
+        message: { role: 'assistant', content: 'ok' },
+        prompt_eval_count: 5,
+        eval_count: 2,
+      });
+
+    const app = createApp();
+    const issue = await request(app)
+      .post('/admin/keys')
+      .set('X-Admin-Key', process.env.ADMIN_KEY)
+      .send({ tenant_id: 'dc-tenant', tier: tierId });
+    expect(issue.status).toBe(201);
+    const apiKey = issue.body.api_key;
+
+    // 1st call succeeds (cap of 1 not yet crossed).
+    const r1 = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ messages: [{ role: 'user', content: 'hi' }] });
+    expect(r1.status).toBe(200);
+
+    // 2nd call trips the daily_request_cap → 429 + persisted event.
+    const r2 = await request(app)
+      .post('/v1/chat/completions')
+      .set('Authorization', `Bearer ${apiKey}`)
+      .send({ messages: [{ role: 'user', content: 'hi again' }] });
+    expect(r2.status).toBe(429);
+    expect(r2.body.error.type).toBe('daily_quota_exceeded');
+    expect(r2.body.error.reason).toBe('request_cap');
+
+    expect(fs.existsSync(process.env.RATE_LIMITS_FILE)).toBe(true);
+    const lines = fs.readFileSync(process.env.RATE_LIMITS_FILE, 'utf8')
+      .split('\n').filter((l) => l.trim());
+    // Find the daily-quota row — the file MAY also have an upstream rate_limit_*
+    // row if the test environment surfaced one; we only assert on the one we
+    // expect to exist.
+    const dailyRow = lines.map((l) => JSON.parse(l))
+      .find((r) => r.kind === 'daily_quota_request');
+    expect(dailyRow).toBeDefined();
+    expect(dailyRow.subject_type).toBe('tenant');
+    expect(dailyRow.subject_value).toBe('dc-tenant');
+    expect(dailyRow.path).toBe('/v1/chat/completions');
+    expect(dailyRow.status).toBe(429);
+    expect(typeof dailyRow.retry_after_s).toBe('number');
+    expect(dailyRow.retry_after_s).toBeGreaterThan(0);
+    expect(dailyRow.package_id).toBe(tierId);
   });
 });
 

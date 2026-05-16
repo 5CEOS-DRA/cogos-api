@@ -22,6 +22,10 @@ beforeEach(() => {
   process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
   anomaliesFile = path.join(tmpDir, 'anomalies.jsonl');
   process.env.ANOMALIES_FILE = anomaliesFile;
+  // Persist-events JSONL files — isolate so honeypot probes + fail-closed
+  // 429s in this suite don't leak into the repo's data/ directory.
+  process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
+  process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
   // Tight TTL so the eviction test runs without sleeping.
   process.env.ANOMALY_BUCKET_TTL_MS = '120000'; // 2 min default for most tests
   jest.resetModules();

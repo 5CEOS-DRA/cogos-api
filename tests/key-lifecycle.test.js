@@ -28,6 +28,10 @@ beforeEach(() => {
   process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
   process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
   process.env.ANOMALIES_FILE = path.join(tmpDir, 'anomalies.jsonl');
+  // Persist-events JSONL files — isolate so honeypot + 429 paths exercised
+  // by the quarantine tests don't leak into the repo's data/ directory.
+  process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
+  process.env.RATE_LIMITS_FILE = path.join(tmpDir, 'rate-limits.jsonl');
   jest.resetModules();
 });
 

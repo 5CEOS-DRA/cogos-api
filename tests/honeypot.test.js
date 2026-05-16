@@ -17,6 +17,7 @@ const os = require('os');
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cogos-hp-test-'));
 process.env.KEYS_FILE = path.join(tmpDir, 'keys.json');
 process.env.USAGE_FILE = path.join(tmpDir, 'usage.jsonl');
+process.env.HONEYPOTS_FILE = path.join(tmpDir, 'honeypots.jsonl');
 
 const request = require('supertest');
 const { createApp } = require('../src/index');
@@ -91,5 +92,30 @@ describe('honeypot middleware', () => {
     const app = createApp();
     const res = await request(app).get(p);
     expect(res.status).toBe(401);
+  });
+
+  // Persistence: every hit appends one structured row to HONEYPOTS_FILE
+  // so /admin/analytics/honeypots can surface real time-series numbers.
+  test('GET /.env appends a row to HONEYPOTS_FILE with the expected schema', async () => {
+    // Start from a clean file — prior tests in this suite already hit
+    // the same env-var-pointed location, so this assertion is about
+    // SHAPE not COUNT.
+    try { fs.unlinkSync(process.env.HONEYPOTS_FILE); } catch (_e) {}
+    const app = createApp();
+    const res = await request(app).get('/.env').set('User-Agent', 'curl/8.0');
+    expect(res.status).toBe(200);
+    expect(fs.existsSync(process.env.HONEYPOTS_FILE)).toBe(true);
+    const lines = fs.readFileSync(process.env.HONEYPOTS_FILE, 'utf8')
+      .split('\n')
+      .filter((l) => l.trim());
+    expect(lines.length).toBe(1);
+    const row = JSON.parse(lines[0]);
+    expect(typeof row.ts).toBe('string');
+    expect(row.path).toBe('/.env');
+    expect(row.normalized_path).toBe('/.env');
+    expect(row.method).toBe('GET');
+    expect(typeof row.ip).toBe('string');
+    expect(row.ua).toBe('curl/8.0');
+    expect(row.country).toBe(null);
   });
 });

@@ -238,7 +238,7 @@ All recipes assume <code>COGOS_API_KEY</code> is set in your env. If you don&apo
 <h2><span class="recipe-num">5</span> Bounded agent step (tool-use shape)</h2>
 
 <div class="recipe">
-<p>Allowed actions as an enum, action arguments in a sibling object. The agent decides <em>which</em> action; you decide <em>which actions are even possible</em>. Maps cleanly onto OpenAI / Anthropic tool-use loops.</p>
+<p>Allowed actions as an enum, action arguments in a sibling object. The agent decides <em>which</em> action; you decide <em>which actions are even possible</em>. The shape maps cleanly onto common tool-use loop patterns.</p>
 
 <pre><span class="code-label">curl</span><code>curl -s https://cogos.5ceos.com/v1/chat/completions \\
   -H "Authorization: Bearer $COGOS_API_KEY" \\

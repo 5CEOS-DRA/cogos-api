@@ -11,7 +11,7 @@
     { "url": "https://cogos.5ceos.com", "description": "Production" }
   ],
   "tags": [
-    { "name": "completions", "description": "OpenAI-shape chat completions" },
+    { "name": "completions", "description": "Schema-locked chat completions in the widely-adopted /v1/chat/completions format" },
     { "name": "models", "description": "Available models" },
     { "name": "audit", "description": "Hash-chained audit receipts per (tenant, app)" },
     { "name": "signup", "description": "Free-tier key issuance" }
@@ -95,7 +95,7 @@
           },
           "cogos": {
             "type": "object",
-            "description": "CogOS-specific metadata block (non-OpenAI). Includes schema enforcement flag, server-side latency, and the request_id you can use to look up the audit receipt.",
+            "description": "CogOS-specific metadata block (extension to the standard chat-completion response). Includes schema enforcement flag, server-side latency, and the request_id you can use to look up the audit receipt.",
             "properties": {
               "schema_enforced": { "type": "boolean" },
               "latency_ms": { "type": "integer" },

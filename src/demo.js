@@ -199,7 +199,7 @@ fallbacks. With it, the output <strong>is</strong> the schema.
 <h3>What you didn't have to write</h3>
 <pre><span class="code-label">the loop you don't need</span><code># With a hosted provider that doesn't enforce at the decoder:
 for attempt in range(MAX_RETRIES):
-    raw = openai_call(prompt)
+    raw = upstream_llm_call(prompt)
     try:
         parsed = json.loads(strip_markdown_fences(raw))
         jsonschema.validate(parsed, my_schema)
@@ -338,7 +338,7 @@ print(f"  Frontier-API equiv list = \${N * FRONTIER_PER_CALL_USD:.4f}  ({FRONTIE
     <tr>
       <td style="padding:8px 12px;border:1px solid #21262d">Cost</td>
       <td style="padding:8px 12px;border:1px solid #21262d">~10&times; below frontier-API list</td>
-      <td style="padding:8px 12px;border:1px solid #21262d">A $4K/mo OpenAI bill becomes a $400/mo CogOS bill at the same call volume.</td>
+      <td style="padding:8px 12px;border:1px solid #21262d">A $4K/mo frontier-API bill becomes a $400/mo CogOS bill at the same call volume.</td>
     </tr>
   </tbody>
 </table>

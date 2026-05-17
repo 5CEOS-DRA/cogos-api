@@ -289,9 +289,9 @@ We do NOT guarantee:
       separate &quot;parseable&quot; from &quot;actually answers the
       question.&quot;</li>
   <li><strong>Determinism against arbitrary upstreams.</strong> If you
-      configure <code>UPSTREAM_PROVIDER=openai</code> and point at someone
-      else's gateway, you inherit their non-determinism. The guarantees
-      hold against CogOS-operated inference.</li>
+      configure CogOS to point at someone else's hosted inference
+      endpoint, you inherit their non-determinism. The guarantees hold
+      against CogOS-operated inference.</li>
 </ul>
 
 <hr>
@@ -542,12 +542,12 @@ The substrate is opinionated. Where it stops is part of the contract.
       you need a fine-tuned model, you can serve it via the same gateway,
       but we won't fine-tune it for you.</li>
   <li><strong>We do not wrap third-party hosted LLMs in production.</strong>
-      The <code>UPSTREAM_PROVIDER=openai</code> adapter exists for
-      operator-owned or BYO-customer endpoints (you point at your own vLLM
-      deployment, a colo'd GPU, etc.). We do not silently relay your calls
-      to OpenAI / Anthropic / Fireworks / etc. behind the substrate.
-      The doctrine is on the landing page: <em>we can't sell against
-      integration tax and be guilty of it</em>.</li>
+      An OpenAI-compatible upstream adapter exists for operator-owned or
+      BYO-customer endpoints (you point at your own vLLM deployment, a
+      colo'd GPU, etc.). We do not silently relay your calls to any
+      third-party hosted LLM provider behind the substrate. The doctrine
+      is on the landing page: <em>we can't sell against integration tax
+      and be guilty of it</em>.</li>
   <li><strong>We do not store your prompts or completions by default.</strong>
       The audit log is metadata only — request ID, model, latency,
       token counts, schema-enforcement flag, timestamp. Content is opt-in

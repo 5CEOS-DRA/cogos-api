@@ -44,6 +44,31 @@ if [ -z "${COSIGN_KEY_FILE:-}" ] && [ -f "$PWD/cosign.key" ]; then
   COSIGN_KEY_FILE="$PWD/cosign.key"
   echo "[deploy] auto-detected COSIGN_KEY_FILE=$COSIGN_KEY_FILE"
 fi
+
+# Authenticate cosign to ACR via a refresh token. The previous flow assumed
+# 'az acr login' had cached Docker creds; without a running Docker daemon
+# that path silently degrades and cosign falls back to anonymous OAuth,
+# which ACR refuses with 401 Unauthorized. --expose-token mints a refresh
+# token that we feed into cosign login -- no Docker required.
+if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ] && command -v cosign &>/dev/null; then
+  echo "[deploy] obtaining ACR refresh token for cosign..."
+  ACR_TOKEN=$(az acr login \
+    --subscription "${SUB}" \
+    --name "${ACR_NAME}" \
+    --expose-token \
+    --query accessToken -o tsv 2>/dev/null || true)
+  if [ -n "${ACR_TOKEN}" ]; then
+    # ACR's refresh-token auth requires the literal user 00000000-0000-0000-0000-000000000000
+    if echo "${ACR_TOKEN}" | cosign login "${ACR_NAME}.azurecr.io" \
+         -u 00000000-0000-0000-0000-000000000000 --password-stdin >/dev/null 2>&1; then
+      echo "[deploy] ✓ cosign authenticated to ${ACR_NAME}.azurecr.io"
+    else
+      echo "[deploy] WARN: cosign login to ACR failed (got token but login rejected)"
+    fi
+  else
+    echo "[deploy] WARN: az acr login --expose-token returned empty -- cosign sign will likely 401"
+  fi
+fi
 # Auto-fetch COSIGN_PASSWORD from Key Vault if unset locally. Lets a
 # single bash deploy-update.sh sign automatically without exporting the
 # password into the shell on every machine.

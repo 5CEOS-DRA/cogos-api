@@ -31,6 +31,7 @@ COPY --from=deps --chown=nonroot:nonroot /app/data ./data
 COPY --chown=nonroot:nonroot src ./src
 COPY --chown=nonroot:nonroot scripts ./scripts
 COPY --chown=nonroot:nonroot package.json ./
+COPY --chown=nonroot:nonroot openapi.json ./
 ENV NODE_ENV=production \
     PORT=4444
 EXPOSE 4444

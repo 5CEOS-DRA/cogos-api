@@ -25,6 +25,7 @@ const { makeAdminAnalyticsRouter } = require('./routers/admin-analytics');
 const { makeAuditCheckpointRouter } = require('./routers/audit-checkpoint');
 const { makePublicContentRouter } = require('./routers/public-content');
 const { makeV1Router } = require('./routers/v1');
+const { makeProcessRouter } = require('./routers/process');
 const { makeAdminRouter } = require('./routers/admin');
 
 // Strict security headers on every response. Strongest possible CSP given
@@ -970,6 +971,13 @@ function createApp() {
     handleListModels, handleChatCompletions,
     enforceDailyCap, enforcePackage,
   }));
+
+  // ---- /v1/process/* Process Library (Path B, operator directive 2026-05-25) ----
+  // Deterministic, doctrine-pure processes callable by any sk-cogos-* key
+  // (no platform tenant required). v0.1 ships iolta-reconcile only; the
+  // public catalog page at #/cogos/processes on the platform lists what's
+  // available and what's on the roadmap.
+  app.use('/v1/process', makeProcessRouter({ customerAuth, tenantLimiter }));
 
   // ---- /admin/* operator surface (X-Admin-Key gated) ----
   // Keys CRUD + quarantine, packages CRUD, usage log, SOC 2 evidence,

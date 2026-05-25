@@ -75,7 +75,7 @@ describe('process: iolta-reconcile', () => {
     expect(res.body.receipt.request_id).toMatch(/^proc_/);
     expect(typeof res.body.receipt.ms).toBe('number');
     expect(res.body.receipt.deterministic_hash).toMatch(/^sha256:[0-9a-f]{64}$/);
-    expect(res.body.receipt.reconciler_version).toBe(1);
+    expect(res.body.reconciler_version).toBe(1);
   });
 
   test('commingling case · sub-ledger goes negative · block_reason=commingling_block', async () => {

@@ -26,6 +26,7 @@ const { makeAuditCheckpointRouter } = require('./routers/audit-checkpoint');
 const { makePublicContentRouter } = require('./routers/public-content');
 const { makeV1Router } = require('./routers/v1');
 const { makeProcessRouter } = require('./routers/process');
+const { makeComposeRouter } = require('./routers/compose');
 const { makeAdminRouter } = require('./routers/admin');
 
 // Strict security headers on every response. Strongest possible CSP given
@@ -978,6 +979,11 @@ function createApp() {
   // public catalog page at #/cogos/processes on the platform lists what's
   // available and what's on the roadmap.
   app.use('/v1/process', makeProcessRouter({ customerAuth, tenantLimiter }));
+
+  // ---- /v1/compose · multi-step deterministic workflow surface ----
+  // Linear-sequence composition of registered processes with end-to-end
+  // chain hashing. One usage row per composition (not per step).
+  app.use('/v1/compose', makeComposeRouter({ customerAuth, tenantLimiter }));
 
   // ---- /admin/* operator surface (X-Admin-Key gated) ----
   // Keys CRUD + quarantine, packages CRUD, usage log, SOC 2 evidence,

@@ -28,13 +28,13 @@ const express = require('express');
 const crypto = require('crypto');
 const logger = require('../logger');
 const usage = require('../usage');
-const reconciler = require('../processes/iolta-reconciler');
-const conflictEngine = require('../processes/5law-conflict');
 const { canonicalize, canonicalHash } = require('../processes/_canonicalize');
+const { REGISTRY, listProcesses, getProcess } = require('../processes/_registry');
 
+// Legacy route-constant exports kept so external callers and tests
+// importing PROCESS_ROUTE / CONFLICT_ROUTE still resolve.
 const PROCESS_ROUTE = '/v1/process/iolta-reconcile';
 const PROCESS_MODEL_ID = 'process:iolta-reconcile-v1';
-
 const CONFLICT_ROUTE = '/v1/process/5law-conflict-check';
 const CONFLICT_MODEL_ID = 'process:5law-conflict-check-v1';
 
@@ -153,58 +153,24 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
     };
   }
 
-  router.post('/iolta-reconcile', customerAuth, tenantLimiter,
-    invokeProcess({
-      route: PROCESS_ROUTE,
-      modelId: PROCESS_MODEL_ID,
-      engine: (body) => {
-        const result = reconciler.reconcileThreeWay(body);
-        return { ...result, reconciler_version: reconciler.RECONCILER_VERSION };
-      },
-    }),
-  );
-
-  router.post('/5law-conflict-check', customerAuth, tenantLimiter,
-    invokeProcess({
-      route: CONFLICT_ROUTE,
-      modelId: CONFLICT_MODEL_ID,
-      engine: (body) => {
-        const rows = conflictEngine.detectConflicts(body);
-        return { rows, rule_version: conflictEngine.RULE_VERSION, rule_ids_checked: conflictEngine.RULE_IDS };
-      },
-    }),
-  );
+  // Mount each registered process at its slug. Adding a new process
+  // is a one-line drop in src/processes/_registry.js · the route here
+  // picks it up via Object.values(REGISTRY).
+  for (const p of Object.values(REGISTRY)) {
+    const slug = p.id;
+    router.post('/' + slug, customerAuth, tenantLimiter, invokeProcess({
+      route: '/v1/process/' + slug,
+      modelId: p.model_id,
+      engine: p.engine,
+    }));
+  }
 
   // GET /v1/process — catalog endpoint so CLI/tooling can discover what's
   // available. Mirrors the Process Library page on the platform, but here
   // it's machine-readable. No auth required for the catalog itself — the
   // INVOCATIONS are auth-gated.
   router.get('/', (req, res) => {
-    res.json({
-      processes: [
-        {
-          id: 'iolta-reconcile',
-          version: reconciler.RECONCILER_VERSION,
-          status: 'available',
-          doctrine: '5law L4 · ABA Rule 1.15',
-          endpoint: PROCESS_ROUTE,
-          method: 'POST',
-          model_id: PROCESS_MODEL_ID,
-          description: 'Three-way IOLTA trust account reconciliation. Bank vs trust-ledger vs per-client sub-ledger, with commingling detection. Pure function, no LLM.',
-        },
-        {
-          id: '5law-conflict-check',
-          version: conflictEngine.RULE_VERSION,
-          status: 'available',
-          doctrine: '5law L3 · ABA Rules 1.7 + 1.8 + 1.9 + 1.10',
-          endpoint: CONFLICT_ROUTE,
-          method: 'POST',
-          model_id: CONFLICT_MODEL_ID,
-          description: 'Five-rule conflict detection over a supplied matter graph: direct adversity, former-client-same-matter, former-client-confidential, imputed firm, business interest. Pure function, no LLM, ABA-cited.',
-          rule_ids: conflictEngine.RULE_IDS,
-        },
-      ],
-    });
+    res.json({ processes: listProcesses() });
   });
 
   return router;

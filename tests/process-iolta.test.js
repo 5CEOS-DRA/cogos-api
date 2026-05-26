@@ -145,6 +145,23 @@ describe('process: iolta-reconcile', () => {
     expect(iolta.endpoint).toBe('/v1/process/iolta-reconcile');
   });
 
+  test('GET /v1/process · catalog surfaces pricing fields with draft flag', async () => {
+    const app = createApp();
+    const res = await request(app).get('/v1/process');
+    expect(res.status).toBe(200);
+    // Every shipped process should advertise tier + USD + draft until
+    // the operator confirms dollar amounts (see Process Library pricing
+    // memo 2026-05-26). Don't strip pricing_draft without sign-off.
+    for (const p of res.body.processes) {
+      expect(typeof p.pricing_tier).toBe('number');
+      expect([1, 2, 3]).toContain(p.pricing_tier);
+      expect(typeof p.pricing_usd).toBe('number');
+      expect(p.pricing_usd).toBeGreaterThan(0);
+      expect(typeof p.pricing_label).toBe('string');
+      expect(p.pricing_draft).toBe(true);
+    }
+  });
+
   test('deterministic hash · re-orders keys + reformats whitespace, hash stable', () => {
     const { canonicalize, sha256Hex } = procRouter._internal;
     const a = JSON.stringify(canonicalize({

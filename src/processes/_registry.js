@@ -39,6 +39,7 @@
 const reconciler = require('./iolta-reconciler');
 const conflictEngine = require('./5law-conflict');
 const primitive8 = require('./primitive-8');
+const maDetectors = require('./ma-detectors');
 const stateStore = require('../key-state-store');
 
 const REGISTRY = {
@@ -96,6 +97,42 @@ const REGISTRY = {
       if (body._state_version != null) out.state_version = body._state_version;
       if (body._state_hash != null)    out.state_hash    = body._state_hash;
       return out;
+    },
+  },
+
+  'ma-truth-detectors': {
+    id: 'ma-truth-detectors',
+    model_id: 'process:ma-truth-detectors-v1',
+    route: '/v1/process/ma-truth-detectors',
+    version: maDetectors.MAPPER_VERSION,
+    doctrine: 'M&A Truth Doctrine · cogOS deterministic detector pack',
+    description: 'Four-detector regex pack over M&A finding text: IP-restriction triggers (assignment/CoC), data-residency (GDPR/CCPA/sovereignty), regulatory (HIPAA/PCI/SOC), litigation (active suits/IP/employment). Pure regex, no LLM. First-matching rule wins per detector.',
+    pricing_tier: 1,
+    pricing_usd:  0.05,
+    pricing_label: 'Tier 1 · pure rule engine',
+    rule_ids: ['ma_w2_ip_exposure', 'ma_w2_data_residency', 'ma_w2_regulatory_exposure', 'ma_w2_litigation'],
+    engine: (body) => {
+      // Accept either { finding: {...} } or { findings: [...] }.
+      const findings = Array.isArray(body && body.findings) ? body.findings
+                     : (body && body.finding ? [body.finding] : []);
+      if (findings.length === 0) {
+        return { findings: [], rows: [], mapper_version: maDetectors.MAPPER_VERSION };
+      }
+      const rows = [];
+      const annotated = findings.map((f, idx) => {
+        const fires = maDetectors.analyzeFinding(f);
+        for (const fire of fires) {
+          rows.push({ ...fire, finding_index: idx, finding_id: f.id || null });
+        }
+        return { index: idx, id: f.id || null, fire_count: fires.length };
+      });
+      return {
+        findings: annotated,
+        rows,
+        total_findings: findings.length,
+        total_firings: rows.length,
+        mapper_version: maDetectors.MAPPER_VERSION,
+      };
     },
   },
 

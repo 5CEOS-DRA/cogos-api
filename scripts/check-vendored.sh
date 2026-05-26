@@ -45,6 +45,7 @@ MAPPINGS=(
   "src/processes/_compose.js:backend/services/substrate/compose.cjs"
   "src/processes/_keyState.js:backend/services/substrate/keyState.cjs"
   "src/processes/iolta-reconciler.js:backend/services/5law/trustReconciler.cjs"
+  "src/processes/ma-detectors.js:backend/services/ma-truth/detectors/index.js"
   "src/processes/primitive-8/rule_8_03.js:backend/services/ma-truth/organizational-integrity/rules/rule_8_03.js"
   "src/processes/primitive-8/rule_8_04.js:backend/services/ma-truth/organizational-integrity/rules/rule_8_04.js"
 )

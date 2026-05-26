@@ -50,11 +50,13 @@
 
 const rule_8_03 = require('./primitive-8/rule_8_03');
 const rule_8_04 = require('./primitive-8/rule_8_04');
+const rule_8_07 = require('./primitive-8/rule_8_07');
 
 const RULE_VERSION = 1;
 const RULE_REGISTRY = {
   RULE_8_03: rule_8_03,
   RULE_8_04: rule_8_04,
+  RULE_8_07: rule_8_07,
 };
 const RULE_KEYS = Object.freeze(Object.keys(RULE_REGISTRY).sort());
 

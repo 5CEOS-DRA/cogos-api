@@ -70,7 +70,7 @@ describe('process: primitive-8-integrity-check · HTTP boundary', () => {
     expect(p8.status).toBe('available');
     expect(p8.pricing_tier).toBe(1);
     expect(p8.pricing_draft).toBe(true);
-    expect(p8.rule_ids).toEqual(['RULE_8_03', 'RULE_8_04']);
+    expect(p8.rule_ids).toEqual(['RULE_8_03', 'RULE_8_04', 'RULE_8_07']);
   });
 
   test('happy path · contradiction cluster fires RULE_8_04', async () => {
@@ -82,7 +82,7 @@ describe('process: primitive-8-integrity-check · HTTP boundary', () => {
       .send(makeContradictionClusterInputs());
     expect(res.status).toBe(200);
     expect(res.body.rule_version).toBe(1);
-    expect(res.body.total_rules).toBe(2);
+    expect(res.body.total_rules).toBe(3);
     expect(Array.isArray(res.body.rules)).toBe(true);
     const r8_04 = res.body.rules.find((r) => r.rule_key === 'RULE_8_04');
     expect(r8_04.fired).toBe(true);
@@ -101,7 +101,7 @@ describe('process: primitive-8-integrity-check · HTTP boundary', () => {
       .send({ now: NOW });
     expect(res.status).toBe(200);
     expect(res.body.fired_count).toBe(0);
-    expect(res.body.total_rules).toBe(2);
+    expect(res.body.total_rules).toBe(3);
   });
 
   test('receipt carries both deterministic_hash and output_hash', async () => {
@@ -150,6 +150,37 @@ describe('process: primitive-8-integrity-check · HTTP boundary', () => {
     expect(res.status).toBe(200);
     expect(typeof res.body.server_supplied_now).toBe('string');
     expect(res.body.server_supplied_now).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+  });
+
+  test('RULE_8_07 fires when forecast-persona is silent during a committed deal', async () => {
+    const app = createApp();
+    const issued = await issueKey(app, 'p8-r807-' + Date.now());
+    // RULE_8_07 needs: deal in COMMIT/BEST, threshold present, activity inactive.
+    // Customer assembles these per R8.07's pre-flight; in Path B the caller
+    // supplies them directly.
+    const inputs = {
+      deal: {
+        id: 'D1',
+        tenant_id: 'tenant-x',
+        account_id: 'acct-1',
+        account_name: 'Acme Corp',
+        value: 250000,
+        deal_kind: 'new_business',
+        forecast_category: 'COMMIT',
+      },
+      role: 'finance',
+      threshold: { deal_min: 100000, quiet_window_days: 14 },
+      activity: { active: false, days_quiet: 14, last_message_at: null },
+    };
+    const res = await request(app)
+      .post('/v1/process/primitive-8-integrity-check')
+      .set('Authorization', 'Bearer ' + issued.api_key)
+      .send({ ...inputs, enabled_rules: ['RULE_8_07'], now: NOW });
+    expect(res.status).toBe(200);
+    expect(res.body.total_rules).toBe(1);
+    const r8_07 = res.body.rules.find((r) => r.rule_key === 'RULE_8_07');
+    expect(r8_07).toBeDefined();
+    expect(r8_07.fired).toBe(true);
   });
 
   test('usage row tagged model=process:primitive-8-integrity-check-v1', async () => {

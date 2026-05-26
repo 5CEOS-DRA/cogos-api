@@ -48,6 +48,7 @@ MAPPINGS=(
   "src/processes/ma-detectors.js:backend/services/ma-truth/detectors/index.js"
   "src/processes/primitive-8/rule_8_03.js:backend/services/ma-truth/organizational-integrity/rules/rule_8_03.js"
   "src/processes/primitive-8/rule_8_04.js:backend/services/ma-truth/organizational-integrity/rules/rule_8_04.js"
+  "src/processes/primitive-8/rule_8_07.js:backend/services/ma-truth/organizational-integrity/rules/rule_8_07.js"
 )
 
 # Allowed require-path translations · "<vendored require> → <upstream require>"

@@ -239,13 +239,23 @@ function makeStateRouter({ customerAuth, tenantLimiter }) {
   });
 
   // ─── Read: current state (materialized) ─────────────────────────
+  // Optional ?at_version=N for point-in-time replay · returns state AS OF
+  // the Nth mutation (1-indexed; 0 = empty pre-history state).
   router.get('/', customerAuth, tenantLimiter, (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const tk = tenantKey(req);
+    const at_version = req.query.at_version != null ? Number(req.query.at_version) : undefined;
+    if (req.query.at_version != null && (!Number.isInteger(at_version) || at_version < 0)) {
+      const ms = Date.now() - t0;
+      return res.status(400).json({
+        error: { message: 'at_version must be a non-negative integer', type: 'invalid_request_error', code: 'invalid_input' },
+        receipt: { request_id, ms },
+      });
+    }
     let snap;
     try {
-      snap = store.currentState(tk);
+      snap = store.currentState({ ...tk, at_version });
     } catch (e) {
       const ms = Date.now() - t0;
       recordUsage({ req, request_id, route: STATE_ROUTE_PREFIX, latency_ms: ms, status: 'server_error' });
@@ -259,6 +269,7 @@ function makeStateRouter({ customerAuth, tenantLimiter }) {
       matters:       snap.state.matters,
       parties:       snap.state.parties,
       anchor:        snap.anchor,
+      at_version:    at_version != null ? at_version : undefined,
       receipt:       { request_id, ms },
     });
   });

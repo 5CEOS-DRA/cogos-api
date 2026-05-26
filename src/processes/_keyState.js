@@ -218,6 +218,12 @@ function applyMutation(state, row) {
  * Materialize the current state from a journal.
  *
  * @param {Array}  journal — array of rows (verified or unverified)
+ * @param {object} [opts]
+ * @param {number} [opts.at_version] — point-in-time replay · materialize
+ *                                     state AS OF this version (1-indexed
+ *                                     · 0 means "before any mutation").
+ *                                     Out-of-range clamps to the journal
+ *                                     length (latest state).
  * @returns {object} state snapshot:
  *   {
  *     state_version: <int>,
@@ -226,17 +232,24 @@ function applyMutation(state, row) {
  *     parties:       { [matter_id]: Party[] },
  *   }
  */
-function materialize(journal) {
+function materialize(journal, opts = {}) {
   if (!Array.isArray(journal)) {
     throw new TypeError('materialize: journal must be an array');
   }
+  let upTo = journal.length;
+  if (opts.at_version != null) {
+    if (!Number.isInteger(opts.at_version) || opts.at_version < 0) {
+      throw new TypeError('materialize: at_version must be a non-negative integer');
+    }
+    upTo = Math.min(opts.at_version, journal.length);
+  }
   let state = { matters: {}, parties: {} };
-  for (const row of journal) {
-    state = applyMutation(state, row);
+  for (let i = 0; i < upTo; i++) {
+    state = applyMutation(state, journal[i]);
   }
   return canonicalize({
-    state_version: journal.length,
-    state_hash:    journal.length ? journal[journal.length - 1].row_hash : null,
+    state_version: upTo,
+    state_hash:    upTo > 0 ? journal[upTo - 1].row_hash : null,
     matters:       state.matters,
     parties:       state.parties,
   });

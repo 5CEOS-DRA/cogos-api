@@ -232,6 +232,103 @@ describe('state · 5Law conflict-check use_stored_state integration', () => {
   });
 });
 
+describe('state · concurrent writer lock', () => {
+  test('two concurrent writers on the same key serialize cleanly', async () => {
+    const app = createApp();
+    const tenant = 'state-lock-' + Date.now();
+    const issued = await issueKey(app, tenant);
+    const auth = 'Bearer ' + issued.api_key;
+
+    // Fire 10 mutations concurrently against the same key. The lock
+    // primitive must serialize them so the final journal has 10 rows
+    // with a fully verifiable chain.
+    const writes = [];
+    for (let i = 0; i < 10; i++) {
+      writes.push(
+        request(app).post('/v1/state/matters').set('Authorization', auth).send({
+          matter: { id: 'M' + i, status: 'active', practice_area: 'corp' },
+        })
+      );
+    }
+    const results = await Promise.all(writes);
+    for (const r of results) {
+      expect(r.status).toBe(200);
+    }
+
+    // Final journal must be length 10 with intact prev_hash chain.
+    const j = await request(app).get('/v1/state/journal').set('Authorization', auth);
+    expect(j.body.rows).toHaveLength(10);
+    expect(j.body.rows[0].prev_hash).toBe(j.body.anchor);
+    for (let i = 1; i < 10; i++) {
+      expect(j.body.rows[i].prev_hash).toBe(j.body.rows[i - 1].row_hash);
+    }
+  }, 15000);
+
+  test('stale lock (>30s old) is force-released on next acquire', () => {
+    const store = require('../src/key-state-store');
+    const { acquireLock, releaseLock, STALE_LOCK_MS } = store._internal;
+    const tmpFile = path.join(tmpDir, 'lock-test-' + Date.now());
+
+    // Manually create a stale lock by writing the lockfile and backdating.
+    const lockPath = tmpFile + '.lock';
+    fs.writeFileSync(lockPath, '99999');  // bogus pid
+    // Backdate the mtime past STALE_LOCK_MS
+    const stale = new Date(Date.now() - STALE_LOCK_MS - 1000);
+    fs.utimesSync(lockPath, stale, stale);
+
+    // Acquire should succeed (force-release the stale lock).
+    const acquired = acquireLock(tmpFile);
+    expect(acquired).toBe(lockPath);
+    releaseLock(acquired);
+  });
+});
+
+describe('state · point-in-time replay via ?at_version', () => {
+  test('GET /v1/state?at_version=N returns historical state · same state_hash forever', async () => {
+    const app = createApp();
+    const tenant = 'state-pit-' + Date.now();
+    const issued = await issueKey(app, tenant);
+    const auth = 'Bearer ' + issued.api_key;
+
+    // Build a 3-mutation history.
+    await request(app).post('/v1/state/matters').set('Authorization', auth).send({ matter: { id: 'M1', status: 'active' } });
+    await request(app).post('/v1/state/matters').set('Authorization', auth).send({ matter: { id: 'M2', status: 'active' } });
+    await request(app).post('/v1/state/matters/M1/archive').set('Authorization', auth).send({});
+
+    // Latest state · 2 matters, M1 closed.
+    const latest = await request(app).get('/v1/state').set('Authorization', auth);
+    expect(latest.body.state_version).toBe(3);
+    expect(latest.body.matters.M1.status).toBe('closed');
+
+    // Replay at version 2 · M1 should still be active, M2 should exist.
+    const v2 = await request(app).get('/v1/state?at_version=2').set('Authorization', auth);
+    expect(v2.body.state_version).toBe(2);
+    expect(v2.body.matters.M1.status).toBe('active');
+    expect(v2.body.matters.M2).toBeDefined();
+
+    // Replay at version 1 · only M1 exists, still active.
+    const v1 = await request(app).get('/v1/state?at_version=1').set('Authorization', auth);
+    expect(v1.body.state_version).toBe(1);
+    expect(v1.body.matters.M1.status).toBe('active');
+    expect(v1.body.matters.M2).toBeUndefined();
+
+    // Replay at version 0 · empty pre-history state.
+    const v0 = await request(app).get('/v1/state?at_version=0').set('Authorization', auth);
+    expect(v0.body.state_version).toBe(0);
+    expect(v0.body.state_hash).toBe(null);
+    expect(v0.body.matters).toEqual({});
+  });
+
+  test('GET /v1/state?at_version=garbage → 400', async () => {
+    const app = createApp();
+    const tenant = 'state-pit-bad-' + Date.now();
+    const issued = await issueKey(app, tenant);
+    const res = await request(app).get('/v1/state?at_version=-1').set('Authorization', 'Bearer ' + issued.api_key);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('invalid_input');
+  });
+});
+
 describe('state · billing · one usage row per write, none per read', () => {
   test('write emits usage row; read does not', async () => {
     const app = createApp();

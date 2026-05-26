@@ -12,20 +12,33 @@
  * stays unified — a process either exists for both surfaces or neither.
  *
  * Each entry:
- *   id          · the public process name (matches the URL slug)
- *   model_id    · the usage-record `model` field
- *   route       · the single-invocation URL (for the catalog)
- *   version     · engine version emitted in receipts
- *   doctrine    · the doctrine anchor for this engine
- *   description · human-readable summary (used by GET /v1/process)
- *   rule_ids    · optional · for rule-firing engines
- *   engine      · the runStep dispatcher · async (args) => result
+ *   id            · the public process name (matches the URL slug)
+ *   model_id      · the usage-record `model` field
+ *   route         · the single-invocation URL (for the catalog)
+ *   version       · engine version emitted in receipts
+ *   doctrine      · the doctrine anchor for this engine
+ *   description   · human-readable summary (used by GET /v1/process)
+ *   pricing_tier  · 1 | 2 | 3 · the per-call cost band
+ *   pricing_usd   · per-call dollar amount · DRAFT until operator-confirmed
+ *                   against real customer conversations (see Process Library
+ *                   pricing memo 2026-05-26).
+ *   pricing_label · short tier descriptor surfaced in catalog UIs
+ *   rule_ids      · optional · for rule-firing engines
+ *   wrapBody      · optional · pre-engine body injection (e.g. stored state)
+ *   engine        · the runStep dispatcher · async (args) => result
  *
- * To add a new process: drop one entry here. Both routers light up.
+ * To add a new process: drop one entry here. Both routers light up; the
+ * CLI catalog (`cogos process`) and REPL `/processes` pick up the tier
+ * badge automatically.
+ *
+ * Pricing draft policy: `pricing_draft: true` rides every catalog entry
+ * until the operator confirms the dollar amounts. Public-facing surfaces
+ * MUST surface the "draft" label so we don't lock numbers in prematurely.
  */
 
 const reconciler = require('./iolta-reconciler');
 const conflictEngine = require('./5law-conflict');
+const primitive8 = require('./primitive-8');
 const stateStore = require('../key-state-store');
 
 const REGISTRY = {
@@ -36,6 +49,9 @@ const REGISTRY = {
     version: reconciler.RECONCILER_VERSION,
     doctrine: '5law L4 · ABA Rule 1.15',
     description: 'Three-way IOLTA trust account reconciliation. Bank vs trust-ledger vs per-client sub-ledger, with commingling detection. Pure function, no LLM.',
+    pricing_tier: 1,
+    pricing_usd:  0.05,
+    pricing_label: 'Tier 1 · pure rule engine',
     engine: (body) => {
       const result = reconciler.reconcileThreeWay(body);
       return { ...result, reconciler_version: reconciler.RECONCILER_VERSION };
@@ -49,6 +65,9 @@ const REGISTRY = {
     version: conflictEngine.RULE_VERSION,
     doctrine: '5law L3 · ABA Rules 1.7 + 1.8 + 1.9 + 1.10',
     description: 'Five-rule conflict detection over a supplied matter graph: direct adversity, former-client-same-matter, former-client-confidential, imputed firm, business interest. Pure function, no LLM, ABA-cited.',
+    pricing_tier: 1,
+    pricing_usd:  0.05,
+    pricing_label: 'Tier 1 · pure rule engine',
     rule_ids: conflictEngine.RULE_IDS,
     // wrapBody · optional pre-engine injection from per-key state.
     // When body.use_stored_state is true, pull firm_matters +
@@ -79,6 +98,32 @@ const REGISTRY = {
       return out;
     },
   },
+
+  'primitive-8-integrity-check': {
+    id: 'primitive-8-integrity-check',
+    model_id: 'process:primitive-8-integrity-check-v1',
+    route: '/v1/process/primitive-8-integrity-check',
+    version: primitive8.RULE_VERSION,
+    doctrine: 'Primitive 8 · Organizational Integrity v0.1',
+    description: 'Two-rule organizational integrity check over supplied commitments + contradictions: RULE_8_03 (commitment drift curve) + RULE_8_04 (contradiction cluster). Pure function, no LLM, doctrine-cited.',
+    pricing_tier: 1,
+    pricing_usd:  0.05,
+    pricing_label: 'Tier 1 · pure rule engine',
+    rule_ids: primitive8.RULE_KEYS,
+    engine: (body) => {
+      // Caller supplies `now` for deterministic windowing. If absent,
+      // server clock is used — but that breaks bitwise stability across
+      // calls, so we surface it on the response so the caller can pin
+      // it next time for reproducible audit.
+      const now = body && body.now ? body.now : new Date().toISOString();
+      const result = primitive8.evaluate({
+        inputs: body || {},
+        now,
+        enabled_rules: body && Array.isArray(body.enabled_rules) ? body.enabled_rules : undefined,
+      });
+      return { ...result, server_supplied_now: body && body.now ? null : now };
+    },
+  },
 };
 
 function listProcesses() {
@@ -93,6 +138,12 @@ function listProcesses() {
       model_id: p.model_id,
       description: p.description,
     };
+    if (p.pricing_tier != null) {
+      out.pricing_tier  = p.pricing_tier;
+      out.pricing_usd   = p.pricing_usd;
+      out.pricing_label = p.pricing_label;
+      out.pricing_draft = true;
+    }
     if (p.rule_ids) out.rule_ids = p.rule_ids;
     return out;
   });

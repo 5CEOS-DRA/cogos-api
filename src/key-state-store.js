@@ -75,12 +75,48 @@ function ensureDir(p) {
   fs.mkdirSync(path.dirname(p), { recursive: true });
 }
 
+// LRU cache for materialized journals · keyed by the journal file's
+// (size, mtimeMs) so we only re-replay when the file actually changes.
+// Misses re-read + re-parse + cache. Hits short-circuit the file read
+// AND the JSON.parse. v0.1.1 closes the "every read re-replays" gap
+// from Canon v0.5; bounded so memory doesn't grow unboundedly under a
+// large tenant footprint.
+const JOURNAL_CACHE_MAX = Number(process.env.JOURNAL_CACHE_MAX || 64);
+const _journalCache = new Map();   // path → { sizeMtime, rows }
+
+function _cacheGet(path) {
+  const entry = _journalCache.get(path);
+  if (!entry) return null;
+  // Map preserves insertion order; re-insert to bump to most-recent.
+  _journalCache.delete(path);
+  _journalCache.set(path, entry);
+  return entry;
+}
+function _cachePut(path, sizeMtime, rows) {
+  _journalCache.delete(path);
+  _journalCache.set(path, { sizeMtime, rows });
+  while (_journalCache.size > JOURNAL_CACHE_MAX) {
+    const oldest = _journalCache.keys().next().value;
+    _journalCache.delete(oldest);
+  }
+}
+function _cacheInvalidate(path) { _journalCache.delete(path); }
+
 function loadJournal({ tenant_id, key_id }) {
   const p = journalPath({ tenant_id, key_id });
   if (!fs.existsSync(p)) return [];
+  const st = fs.statSync(p);
+  const sizeMtime = st.size + ':' + st.mtimeMs;
+  const cached = _cacheGet(p);
+  if (cached && cached.sizeMtime === sizeMtime) {
+    // Return a shallow copy so callers can't mutate the cached rows.
+    return cached.rows.slice();
+  }
   const text = fs.readFileSync(p, 'utf8');
   const lines = text.split('\n').filter((l) => l.trim().length > 0);
-  return lines.map((l) => JSON.parse(l));
+  const rows = lines.map((l) => JSON.parse(l));
+  _cachePut(p, sizeMtime, rows);
+  return rows.slice();
 }
 
 // Lock primitive · O_EXCL atomic create. Holds the lock for the
@@ -220,5 +256,6 @@ module.exports = {
     acquireLock, releaseLock,
     STATE_DIR_DEFAULT: STATE_DIR,
     LOCK_RETRY_ATTEMPTS, LOCK_RETRY_DELAY_MS, STALE_LOCK_MS,
+    _journalCache, _cacheInvalidate, JOURNAL_CACHE_MAX,
   },
 };

@@ -14,13 +14,14 @@
  * Every invocation appends a hash-chained usage row so customers can
  * audit their own spend via /v1/audit.
  *
- * Receipt shape: { request_id, ms, deterministic_hash } — the hash is
- * sha256(canonicalized request body) so the customer can re-canonicalize
- * locally and prove the cogos-api received exactly what they sent (no
- * MITM mutation). Output hashing is intentionally NOT promised yet —
- * the engine returns Object.create(null) maps whose key-iteration order
- * is insertion-driven; we'll lock that in v0.2 alongside the doctrine
- * note in the Process Library page.
+ * Receipt shape (v0.2): { request_id, ms, deterministic_hash, output_hash }
+ * Both hashes are sha256 of the canonicalized payload — deterministic_hash
+ * over the request body (proves cogos-api received exactly what was sent),
+ * output_hash over the engine response (proves the same input will produce
+ * the same output forever, for this engine version). v0.2 closes the
+ * output-canonicalization gap by routing every engine response through
+ * the shared canonicalize primitive (src/processes/_canonicalize.js)
+ * before the hash is computed and before the body ships.
  */
 
 const express = require('express');
@@ -29,6 +30,7 @@ const logger = require('../logger');
 const usage = require('../usage');
 const reconciler = require('../processes/iolta-reconciler');
 const conflictEngine = require('../processes/5law-conflict');
+const { canonicalize, canonicalHash } = require('../processes/_canonicalize');
 
 const PROCESS_ROUTE = '/v1/process/iolta-reconcile';
 const PROCESS_MODEL_ID = 'process:iolta-reconcile-v1';
@@ -36,18 +38,17 @@ const PROCESS_MODEL_ID = 'process:iolta-reconcile-v1';
 const CONFLICT_ROUTE = '/v1/process/5law-conflict-check';
 const CONFLICT_MODEL_ID = 'process:5law-conflict-check-v1';
 
-// Stable canonicalization · sorts keys at every level, drops undefined.
-// Matches the doctrinal "same input → same hash" promise on the Process
-// Library page. Arrays preserve order (intentional — ledger row order
-// is semantically meaningful for downstream audit).
-function canonicalize(value) {
+// Legacy inline canonicalize · DEPRECATED, kept for the tests that still
+// import procRouter._internal.canonicalize. New code in this file uses
+// the shared `canonicalize` from _canonicalize.js (imported above).
+function legacyCanonicalize(value) {
   if (value === null || typeof value !== 'object') return value;
-  if (Array.isArray(value)) return value.map(canonicalize);
+  if (Array.isArray(value)) return value.map(legacyCanonicalize);
   const keys = Object.keys(value).sort();
   const out = {};
   for (const k of keys) {
     if (value[k] === undefined) continue;
-    out[k] = canonicalize(value[k]);
+    out[k] = legacyCanonicalize(value[k]);
   }
   return out;
 }
@@ -77,9 +78,10 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
       const request_id = newRequestId();
       const body = req.body || {};
 
-      const canonicalInput = canonicalize(body);
-      const canonicalBytes = JSON.stringify(canonicalInput);
-      const deterministic_hash = 'sha256:' + sha256Hex(canonicalBytes);
+      // Input hash · proves cogos-api received exactly what the caller
+      // sent (no MITM mutation). Computed BEFORE engine call so failed
+      // calls still ship a verifiable receipt.
+      const deterministic_hash = canonicalHash(body);
 
       let result;
       try {
@@ -135,9 +137,18 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
       // Result shape varies per process; receipt is universal.
       // For non-object results (e.g. arrays from conflict engine), wrap.
       const payload = Array.isArray(result) ? { rows: result } : (result || {});
+
+      // Output hash · proves the engine produced bitwise-stable output
+      // for this canonical input. v0.2 substrate engineering: the engines
+      // route their output through canonicalize() before return, so the
+      // hash here is sha256(canonical engine output) — same input always
+      // produces the same output_hash, for this engine version.
+      // Spec gap closed by commit 8745d722d on the platform repo.
+      const output_hash = canonicalHash(payload);
+
       return res.status(200).json({
         ...payload,
-        receipt: { request_id, ms, deterministic_hash },
+        receipt: { request_id, ms, deterministic_hash, output_hash },
       });
     };
   }
@@ -204,5 +215,16 @@ module.exports = {
   PROCESS_ROUTE,
   PROCESS_MODEL_ID,
   // exported for tests
-  _internal: { canonicalize, sha256Hex },
+  _internal: {
+    // Shared canonicalization primitive (used by the handler and the
+    // engines via _canonicalize.js). canonicalize() and the tests'
+    // sha256Hex shim alias come from the shared module so tests don't
+    // diverge from production behavior.
+    canonicalize,
+    sha256Hex: (s) => require('crypto').createHash('sha256').update(s).digest('hex'),
+    canonicalHash,
+    // Pre-v0.2 inline canonicalize, kept only for one test that asserts
+    // the old behavior. Do not use in new code.
+    legacyCanonicalize,
+  },
 };

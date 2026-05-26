@@ -1,17 +1,14 @@
 'use strict';
 
+const { canonicalize, sortRowsBy } = require('./_canonicalize');
+
 /**
- * 5Law Conflict Detection Engine — vendored from 5ceos-platform-internal.
- *
- * VENDORED COPY · source of truth lives at:
- *   5ceos-platform-internal/backend/services/5law/conflictEngine.cjs
- *
- * Pure-function module. Vendored not proxied — one auth boundary, zero
- * RPC latency. Fix upstream and re-copy; never edit in place.
- *
  * 5law Conflict Detection Engine v0.1
  *
  * Implements L3 of docs/5LAW_DOCTRINE_v0.1.md (locked 90a632d6b).
+ * v0.2 (2026-05-26): rows sorted by stable canonical key precedence
+ * and output routed through canonicalize() before return so
+ * Substrate Canon I1 v0.2 output-hash determinism holds.
  *
  * Pure-function deterministic engine over the matter graph. No I/O,
  * no LLM, no side effects. Caller provides all data; engine returns
@@ -370,13 +367,18 @@ function detectConflicts(input) {
     firm_business_interests:        input.firm_business_interests || []
   };
 
-  return [].concat(
+  const allRows = [].concat(
     detectDirectAdversity(safe),
     detectFormerClientSameMatter(safe),
     detectFormerClientConfidential(safe),
     detectImputedFirm(safe),
     detectBusinessInterest(safe)
   );
+  // Stable order: within each detector, iteration is input-order-dependent;
+  // sort by (rule_id, conflicting_matter_id, parties_involved) so the final
+  // rows[] is bitwise-stable across input party-list permutations.
+  const sorted = sortRowsBy(allRows, ['rule_id', 'conflicting_matter_id', 'parties_involved']);
+  return canonicalize(sorted);
 }
 
 module.exports = {

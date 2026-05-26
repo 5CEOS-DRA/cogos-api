@@ -1,20 +1,13 @@
 'use strict';
 
+const { canonicalize } = require('./_canonicalize');
+
 /**
- * IOLTA Reconciler — vendored from 5ceos-platform-internal.
- *
- * VENDORED COPY · source of truth lives at:
- *   5ceos-platform-internal/backend/services/5law/trustReconciler.cjs
- *
- * Pure-function module, no platform-side dependencies. Vendored (not
- * cross-network proxied) so the cogos-api Process Library v0.1 endpoint
- * runs with one auth boundary (sk-cogos-* on Azure) and zero RPC latency.
- * If upstream changes, re-vendor; never edit in place — fix upstream
- * and re-copy.
- *
  * 5law IOLTA Reconciler v0.1
  *
  * Implements L4 of docs/5LAW_DOCTRINE_v0.1.md (locked 90a632d6b).
+ * v0.2 (2026-05-26): output routed through canonicalize() before
+ * return so Substrate Canon I1 v0.2 output-hash determinism holds.
  *
  * Pure-function deterministic three-way reconciler over a single trust
  * account. No I/O, no LLM. Caller supplies the bank balance, trust
@@ -201,7 +194,12 @@ function reconcileThreeWay(input) {
   if (commingling.length > 0) block_reason = BLOCK_REASON.COMMINGLING;
   else if (!three_way_match)  block_reason = BLOCK_REASON.RECONCILIATION_FAILED;
 
-  return {
+  // Canonicalize before return: object keys sorted at every level,
+  // per_client_balances entries sorted (Object.create(null) iteration
+  // order depends on insertion order, which depends on input row order).
+  // The divergences array is built in fixed code order (bank→trust→sub
+  // then commingling), so its order is already stable.
+  return canonicalize({
     reconciler_version:           RECONCILER_VERSION,
     as_of_date:                   input.as_of_date || null,
     bank_balance_cents:           bank,
@@ -213,7 +211,7 @@ function reconcileThreeWay(input) {
     commingling_violations:       commingling,
     can_close_period,
     block_reason
-  };
+  });
 }
 
 // ────────────────────────────────────────────────────────────────────

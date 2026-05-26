@@ -72,16 +72,22 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
   // pipeline: canonicalize → engine call → usage record → response with
   // receipt. Extracted so a third process is one block of config, not
   // 80 lines of copy-paste.
-  function invokeProcess({ route, modelId, engine }) {
+  function invokeProcess({ route, modelId, engine, wrapBody }) {
     return (req, res) => {
       const t0 = Date.now();
       const request_id = newRequestId();
-      const body = req.body || {};
+      const rawBody = req.body || {};
 
       // Input hash · proves cogos-api received exactly what the caller
-      // sent (no MITM mutation). Computed BEFORE engine call so failed
-      // calls still ship a verifiable receipt.
-      const deterministic_hash = canonicalHash(body);
+      // sent (no MITM mutation). Computed on the RAW body BEFORE any
+      // wrapBody injection so the hash matches what the customer sent.
+      const deterministic_hash = canonicalHash(rawBody);
+
+      // wrapBody · optional per-process pre-engine injection. Lets a
+      // process pull tenant-state from the gateway (e.g. 5law-conflict-
+      // check using stored firm graph). The wrapped body is what the
+      // engine sees and what gets output-hashed.
+      const body = typeof wrapBody === 'function' ? wrapBody(req, rawBody) : rawBody;
 
       let result;
       try {
@@ -162,6 +168,7 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
       route: '/v1/process/' + slug,
       modelId: p.model_id,
       engine: p.engine,
+      wrapBody: p.wrapBody,
     }));
   }
 

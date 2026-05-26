@@ -26,6 +26,7 @@
 
 const reconciler = require('./iolta-reconciler');
 const conflictEngine = require('./5law-conflict');
+const stateStore = require('../key-state-store');
 
 const REGISTRY = {
   'iolta-reconcile': {
@@ -49,9 +50,33 @@ const REGISTRY = {
     doctrine: '5law L3 · ABA Rules 1.7 + 1.8 + 1.9 + 1.10',
     description: 'Five-rule conflict detection over a supplied matter graph: direct adversity, former-client-same-matter, former-client-confidential, imputed firm, business interest. Pure function, no LLM, ABA-cited.',
     rule_ids: conflictEngine.RULE_IDS,
+    // wrapBody · optional pre-engine injection from per-key state.
+    // When body.use_stored_state is true, pull firm_matters +
+    // parties_by_matter_id from the customer's stored journal instead
+    // of requiring them inline. Lets a customer journal-in their firm
+    // graph once and run every subsequent check against it.
+    wrapBody: (req, body) => {
+      if (!body || !body.use_stored_state) return body;
+      const tenant_id = req.apiKey && req.apiKey.tenant_id;
+      const key_id    = req.apiKey && req.apiKey.id;
+      if (!tenant_id || !key_id) return body;  // shouldn't happen post-customerAuth; defense in depth
+      const stored = stateStore.conflictInputForKey({ tenant_id, key_id });
+      return {
+        ...body,
+        firm_matters:         stored.firm_matters,
+        parties_by_matter_id: stored.parties_by_matter_id,
+        // pass through state_version + state_hash so the receipt can
+        // commit to which point-in-time of the journal was used
+        _state_version: stored.state_version,
+        _state_hash:    stored.state_hash,
+      };
+    },
     engine: (body) => {
       const rows = conflictEngine.detectConflicts(body);
-      return { rows, rule_version: conflictEngine.RULE_VERSION, rule_ids_checked: conflictEngine.RULE_IDS };
+      const out = { rows, rule_version: conflictEngine.RULE_VERSION, rule_ids_checked: conflictEngine.RULE_IDS };
+      if (body._state_version != null) out.state_version = body._state_version;
+      if (body._state_hash != null)    out.state_hash    = body._state_hash;
+      return out;
     },
   },
 };

@@ -27,6 +27,7 @@ const { makePublicContentRouter } = require('./routers/public-content');
 const { makeV1Router } = require('./routers/v1');
 const { makeProcessRouter } = require('./routers/process');
 const { makeComposeRouter } = require('./routers/compose');
+const { makeStateRouter } = require('./routers/state');
 const { makeAdminRouter } = require('./routers/admin');
 
 // Strict security headers on every response. Strongest possible CSP given
@@ -984,6 +985,12 @@ function createApp() {
   // Linear-sequence composition of registered processes with end-to-end
   // chain hashing. One usage row per composition (not per step).
   app.use('/v1/compose', makeComposeRouter({ customerAuth, tenantLimiter }));
+
+  // ---- /v1/state · per-key stateful substrate ----
+  // Journal-in your firm graph once, then run every conflict check
+  // against stored, hash-chained, audit-grade state. One usage row per
+  // write; reads are free.
+  app.use('/v1/state', makeStateRouter({ customerAuth, tenantLimiter }));
 
   // ---- /admin/* operator surface (X-Admin-Key gated) ----
   // Keys CRUD + quarantine, packages CRUD, usage log, SOC 2 evidence,

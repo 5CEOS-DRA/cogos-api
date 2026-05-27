@@ -195,6 +195,53 @@ function makeV1Router({
     }
   });
 
+  // GET /v1/viewports[?app=&status=]
+  // GET /v1/viewports/:id
+  // GET /v1/viewports/:id/rows
+  //
+  // Zone B viewport read surface. Each proxies to platform's
+  // /api/internal/viewports{,/:id,/:id/rows} with
+  // ?tenant=<req.apiKey.tenant_id> injected in the signed canonical
+  // path. Tenant tampering breaks the HMAC; platform additionally
+  // applies tenant scoping in WHERE clauses + RLS as defense-in-depth.
+  //
+  // Per Phase 2 acceptance criteria D (commands) + H (cross-tenant 404).
+  function proxyViewportRead(internalPath) {
+    return async (req, res) => {
+      const tenantId = req.apiKey && req.apiKey.tenant_id;
+      if (!tenantId) {
+        return res.status(401).json({
+          ok: false, error: { message: 'tenant context missing', type: 'auth_error' },
+        });
+      }
+      const qsExtra = Object.entries(req.query || {})
+        .filter(([k]) => k !== 'tenant')
+        .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`)
+        .join('&');
+      const path = `/api/internal${internalPath}?tenant=${encodeURIComponent(tenantId)}${qsExtra ? '&' + qsExtra : ''}`;
+      try {
+        const r = await proxyToPlatform({ method: 'GET', path });
+        // Forward Cache-Control header if platform set one
+        const cacheControl = r.headers && (r.headers['cache-control'] || r.headers['Cache-Control']);
+        if (cacheControl) res.set('Cache-Control', cacheControl);
+        res.status(r.status).json(r.body);
+      } catch (e) {
+        logger.warn('viewport_proxy_failed', { path, error: e.message });
+        res.status(503).json({
+          ok: false,
+          error: { message: 'viewport surface temporarily unavailable', type: 'upstream_unavailable' },
+        });
+      }
+    };
+  }
+
+  router.get('/viewports', customerAuth, tenantLimiter,
+    proxyViewportRead('/viewports'));
+  router.get('/viewports/:id', customerAuth, tenantLimiter,
+    (req, res) => proxyViewportRead(`/viewports/${encodeURIComponent(req.params.id)}`)(req, res));
+  router.get('/viewports/:id/rows', customerAuth, tenantLimiter,
+    (req, res) => proxyViewportRead(`/viewports/${encodeURIComponent(req.params.id)}/rows`)(req, res));
+
   // GET /v1/intents — primitive catalog · Zone B subscriber surface.
   //
   // Validates sk-cogos-* via customerAuth, then proxies to platform

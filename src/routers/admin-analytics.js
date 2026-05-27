@@ -27,6 +27,15 @@ function parseSinceMs(q) {
 function makeAdminAnalyticsRouter({ adminAuth }) {
   const router = express.Router();
 
+  // Phase 1 acceptance criterion D: /admin/analytics/* surfaces are
+  // slow-changing aggregations (recomputed by the analytics module on
+  // a longer cadence than per-request); allow short-term caching.
+  // Per project_cli_phase_1_acceptance_criteria_v0_1_2026_05_27.
+  router.use((_req, res, next) => {
+    res.set('Cache-Control', 'max-age=300');
+    next();
+  });
+
   router.get('/summary', adminAuth, async (req, res) => {
     try {
       const sinceMs = parseSinceMs(req.query.since_ms);

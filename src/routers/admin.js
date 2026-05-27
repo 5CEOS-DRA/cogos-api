@@ -43,6 +43,23 @@ const REPO_ROOT = path.join(__dirname, '..', '..');
 // prefix slugs.
 const OPERATOR_SENTINEL_TENANT = '_operator';
 
+// Cache-Control middleware factories per audit finding #4 (Phase 1
+// acceptance criterion D). Mutable admin surfaces emit no-store so
+// stale state isn't served from intermediary caches; slow-changing
+// surfaces (SOC2 evidence bundle, analytics summaries) emit max-age
+// to allow short-term caching. Applied per-route to make the policy
+// explicit at the call site rather than implicit at router level.
+function cacheNoStore(_req, res, next) {
+  res.set('Cache-Control', 'no-store');
+  next();
+}
+function cacheMaxAge(seconds) {
+  return function (_req, res, next) {
+    res.set('Cache-Control', `max-age=${seconds}`);
+    next();
+  };
+}
+
 // Append an admin mutation to the _operator audit chain. Returns the new
 // chain head so the handler can surface chain_head_after in the response
 // body. Read-only admin endpoints don't call this — only state-changing
@@ -65,7 +82,7 @@ function makeAdminRouter({ adminAuth }) {
   const router = express.Router();
 
   // ---- Notify signups (operator-only list) ----
-  router.get('/notify-signups', adminAuth, (_req, res) => {
+  router.get('/notify-signups', adminAuth, cacheNoStore, (_req, res) => {
     res.json({ signups: notifySignup.list() });
   });
 
@@ -80,7 +97,7 @@ function makeAdminRouter({ adminAuth }) {
   //   - 'ed25519':  we generate the keypair, return the private PEM
   //     ONCE, persist only the public PEM + a stable keyId. No
   //     reusable customer auth material at rest on our side.
-  router.post('/keys', adminAuth, (req, res) => {
+  router.post('/keys', adminAuth, cacheNoStore, (req, res) => {
     const {
       tenant_id, app_id, label, tier, scheme, expires_at_iso,
     } = req.body || {};
@@ -141,11 +158,11 @@ function makeAdminRouter({ adminAuth }) {
     res.status(201).json(response);
   });
 
-  router.get('/keys', adminAuth, (_req, res) => {
+  router.get('/keys', adminAuth, cacheNoStore, (_req, res) => {
     res.json({ keys: keys.list() });
   });
 
-  router.post('/keys/:id/revoke', adminAuth, (req, res) => {
+  router.post('/keys/:id/revoke', adminAuth, cacheNoStore, (req, res) => {
     const ok = keys.revoke(req.params.id);
     if (!ok) return res.status(404).json({ error: { message: 'Key not found' } });
     logger.info('key_revoked', { id: req.params.id });
@@ -154,11 +171,11 @@ function makeAdminRouter({ adminAuth }) {
   });
 
   // ---- Quarantine surfaces ----
-  router.get('/keys/quarantined', adminAuth, (_req, res) => {
+  router.get('/keys/quarantined', adminAuth, cacheNoStore, (_req, res) => {
     res.json({ keys: keys.listQuarantined() });
   });
 
-  router.post('/keys/:id/clear-quarantine', adminAuth, (req, res) => {
+  router.post('/keys/:id/clear-quarantine', adminAuth, cacheNoStore, (req, res) => {
     const id = req.params.id;
     const found = keys.findById(id);
     if (!found) return res.status(404).json({ error: { message: 'Key not found' } });
@@ -177,7 +194,7 @@ function makeAdminRouter({ adminAuth }) {
   });
 
   // ---- Usage log (?since=<unix-ms>) ----
-  router.get('/usage', adminAuth, (req, res) => {
+  router.get('/usage', adminAuth, cacheNoStore, (req, res) => {
     const sinceMs = Number(req.query.since || 0);
     const all = usage.readAll();
     const filtered = sinceMs > 0
@@ -192,12 +209,12 @@ function makeAdminRouter({ adminAuth }) {
   });
 
   // ---- Packages CRUD ----
-  router.get('/packages', adminAuth, (req, res) => {
+  router.get('/packages', adminAuth, cacheNoStore, (req, res) => {
     const includeInactive = req.query.include_inactive === '1';
     res.json({ packages: packages.list({ includeInactive }) });
   });
 
-  router.post('/packages', adminAuth, async (req, res) => {
+  router.post('/packages', adminAuth, cacheNoStore, async (req, res) => {
     try {
       const pkg = await packages.create(req.body || {});
       const chain_head_after = recordAdminMutation(req);
@@ -212,7 +229,7 @@ function makeAdminRouter({ adminAuth }) {
     }
   });
 
-  router.put('/packages/:id', adminAuth, async (req, res) => {
+  router.put('/packages/:id', adminAuth, cacheNoStore, async (req, res) => {
     try {
       const pkg = await packages.update(req.params.id, req.body || {});
       const chain_head_after = recordAdminMutation(req);
@@ -227,7 +244,7 @@ function makeAdminRouter({ adminAuth }) {
     }
   });
 
-  router.delete('/packages/:id', adminAuth, async (req, res) => {
+  router.delete('/packages/:id', adminAuth, cacheNoStore, async (req, res) => {
     try {
       const ok = await packages.softDelete(req.params.id);
       if (!ok) return res.status(404).json({ error: { message: 'Package not found' } });
@@ -243,7 +260,7 @@ function makeAdminRouter({ adminAuth }) {
   });
 
   // ---- SOC 2 evidence-collection ----
-  router.get('/soc2/evidence-bundle', adminAuth, (_req, res) => {
+  router.get('/soc2/evidence-bundle', adminAuth, cacheMaxAge(300), (_req, res) => {
     try {
       const bundle = soc2.buildEvidenceBundle();
       res.json(bundle);
@@ -253,7 +270,7 @@ function makeAdminRouter({ adminAuth }) {
     }
   });
 
-  router.get('/soc2/control-status', adminAuth, (_req, res) => {
+  router.get('/soc2/control-status', adminAuth, cacheMaxAge(300), (_req, res) => {
     try {
       const status = soc2.readControlMapping();
       res.json(status);
@@ -276,7 +293,7 @@ function makeAdminRouter({ adminAuth }) {
   // PERFORMANCE: invoked frequently. We tail-read usage.jsonl (last
   // ~2MB), full-stream the smaller rate-limits/anomalies JSONLs.
   // Targets <100ms p95 even at a 1GB usage.jsonl.
-  router.get('/health/deep', adminAuth, async (_req, res) => {
+  router.get('/health/deep', adminAuth, cacheNoStore, async (_req, res) => {
     const startedAt = Date.now();
     const out = {
       ok: true,

@@ -256,26 +256,110 @@ function customerAuth(req, res, next) {
   });
 }
 
-// Admin auth for issuance/revocation endpoints. Single shared ADMIN_KEY
-// in env; rotate by changing the env var.
+// Admin auth — Phase 4 dual-mode.
 //
-// Comparison is constant-time via crypto.timingSafeEqual to keep the 256-bit
-// admin key out of timing-oracle reach once the repo is public. We do the
-// length check FIRST because timingSafeEqual throws on length mismatch; the
-// mismatch itself can leak the expected length, but the same length is
-// already implicit in any header-parsing path and we accept that.
-function adminAuth(req, res, next) {
-  const header = req.headers['x-admin-key'] || '';
+// Two accepted credential paths:
+//
+//   1. LEGACY  X-Admin-Key header matching env.ADMIN_KEY (Phase 1 path).
+//              Continues to attribute audit-chain rows to the
+//              OPERATOR_SENTINEL_TENANT ('_operator') for backward compat.
+//              Emits X-Cogos-Key-Deprecated header during the grace
+//              window (ADMIN_KEY_GRACE_UNTIL env var, ISO-8601).
+//              Post-grace: returns 401 expired_admin_key.
+//
+//   2. NEW     Authorization: Bearer sk-cogos-* where the verified key's
+//              tenant_type === 'operator'. Attributes audit-chain rows
+//              to the operator's actual tenant_id (per-operator
+//              attribution instead of sentinel pooling).
+//
+// Either path succeeds; both fail → 401 invalid_admin_credentials.
+// req.adminMode is set so downstream handlers (recordAdminMutation)
+// can branch on attribution.
+//
+// timingSafeEqual is constant-time; length-check first because
+// timingSafeEqual throws on length mismatch.
+
+const keys = require('./keys');
+
+function tryXAdminKey(req, res) {
+  const header = req.headers['x-admin-key'];
+  if (!header) return null;
   const expected = process.env.ADMIN_KEY;
   if (!expected) {
-    return res.status(503).json({ error: { message: 'ADMIN_KEY not configured' } });
+    // Misconfig: header present, env missing. Distinguishes from
+    // post-retirement fail-closed: a properly-retired deploy has
+    // ADMIN_KEY env var DELETED entirely (returns null here, falls
+    // through to the sk-cogos-* path or 401). If env IS set but the
+    // header doesn't match the secret, 503 below clarifies misconfig.
+    return { fail: 'misconfig', status: 503, error: { message: 'ADMIN_KEY not configured' } };
   }
   const a = Buffer.from(String(header));
   const b = Buffer.from(String(expected));
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(401).json({ error: { message: 'Invalid admin key' } });
+    return { fail: 'mismatch' };
   }
-  next();
+  // Match. Check grace deadline.
+  const graceUntil = process.env.ADMIN_KEY_GRACE_UNTIL;
+  if (graceUntil) {
+    const graceMs = Date.parse(graceUntil);
+    if (Number.isFinite(graceMs) && Date.now() > graceMs) {
+      return {
+        fail: 'expired',
+        status: 401,
+        error: {
+          message: 'X-Admin-Key retired; use sk-cogos-* with tenant_type=operator',
+          type: 'expired_admin_key',
+        },
+      };
+    }
+    // Inside grace window — surface deprecation header so callers can
+    // see the deadline + migrate.
+    res.set('X-Cogos-Key-Deprecated', `rotation_grace_until=${graceUntil}`);
+  }
+  return { ok: true, mode: 'x-admin-key' };
+}
+
+function trySkCogosOperator(req) {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || typeof authHeader !== 'string') return null;
+  if (!authHeader.startsWith('Bearer ')) return null;
+  const plaintext = authHeader.slice('Bearer '.length).trim();
+  if (!plaintext) return null;
+  let verified;
+  try { verified = keys.verify(plaintext); }
+  catch (_e) { return null; }
+  if (!verified) return null;
+  if (verified.tenant_type !== 'operator') return null;
+  return { ok: true, mode: 'sk-cogos-operator', apiKey: verified };
+}
+
+function adminAuth(req, res, next) {
+  // Path 1: legacy X-Admin-Key. If the header is present we commit to
+  // this path's success/failure shape (misconfig 503 / expired 401 /
+  // mismatch falls through to path 2 — operators in transition may
+  // accidentally send both headers).
+  const xResult = tryXAdminKey(req, res);
+  if (xResult) {
+    if (xResult.ok) {
+      req.adminMode = xResult.mode;
+      return next();
+    }
+    if (xResult.fail === 'misconfig' || xResult.fail === 'expired') {
+      return res.status(xResult.status).json({ error: xResult.error });
+    }
+    // 'mismatch' — fall through to try sk-cogos-* path
+  }
+  // Path 2: sk-cogos-* with tenant_type='operator'
+  const skResult = trySkCogosOperator(req);
+  if (skResult && skResult.ok) {
+    req.adminMode = skResult.mode;
+    req.apiKey = skResult.apiKey;
+    return next();
+  }
+  // Neither path succeeded
+  return res.status(401).json({
+    error: { message: 'invalid_admin_credentials', type: 'invalid_admin_credentials' },
+  });
 }
 
 module.exports = { bearerAuth, ed25519Auth, customerAuth, adminAuth };

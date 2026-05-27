@@ -60,14 +60,22 @@ function cacheMaxAge(seconds) {
   };
 }
 
-// Append an admin mutation to the _operator audit chain. Returns the new
+// Append an admin mutation to the audit chain. Returns the new
 // chain head so the handler can surface chain_head_after in the response
 // body. Read-only admin endpoints don't call this — only state-changing
 // mutations (per Phase 1 acceptance criteria A).
+//
+// Phase 4 dual-mode attribution: branch on req.adminMode (set by adminAuth):
+//   'x-admin-key'        → legacy. Chain row tagged tenant_id=OPERATOR_SENTINEL_TENANT
+//                          (same as Phase 1; preserves chain continuity).
+//   'sk-cogos-operator'  → new. Chain row tagged with the operator's actual
+//                          tenant_id (per-operator attribution). key_id carries
+//                          the bearer record id for audit linkage.
 function recordAdminMutation(req, status = 'success') {
+  const isPerOperator = req.adminMode === 'sk-cogos-operator' && req.apiKey;
   return usage.record({
-    tenant_id: OPERATOR_SENTINEL_TENANT,
-    key_id: null,         // admin actions have no req.apiKey.id
+    tenant_id: isPerOperator ? req.apiKey.tenant_id : OPERATOR_SENTINEL_TENANT,
+    key_id: isPerOperator ? req.apiKey.id : null,
     route: req.method + ' ' + (req.route?.path
       ? '/admin' + req.route.path
       : req.originalUrl),

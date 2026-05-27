@@ -99,7 +99,7 @@ function makeAdminRouter({ adminAuth }) {
   //     reusable customer auth material at rest on our side.
   router.post('/keys', adminAuth, cacheNoStore, (req, res) => {
     const {
-      tenant_id, app_id, label, tier, scheme, expires_at_iso,
+      tenant_id, app_id, label, tier, scheme, expires_at_iso, tenant_type,
     } = req.body || {};
     if (!tenant_id) {
       return res.status(400).json({ error: { message: 'tenant_id required' } });
@@ -119,6 +119,9 @@ function makeAdminRouter({ adminAuth }) {
         tier,
         scheme: requestedScheme,
         expires_at_iso: expires_at_iso || null,
+        // Phase 4: optional tenant_type · defaults to 'subscriber'. Operator
+        // mints 'operator' keys for self-issued operator-tier credentials.
+        tenant_type: tenant_type || undefined,
       });
     } catch (e) {
       return res.status(400).json({ error: { message: e.message } });
@@ -134,6 +137,7 @@ function makeAdminRouter({ adminAuth }) {
     const response = {
       key_id: record.id,
       tenant_id: record.tenant_id,
+      tenant_type: record.tenant_type,    // Phase 4 · 'subscriber' | 'operator'
       app_id: record.app_id,
       tier: record.tier,
       scheme: requestedScheme,

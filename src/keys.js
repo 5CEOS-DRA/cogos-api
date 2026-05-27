@@ -30,6 +30,24 @@ const DEFAULT_APP_ID = '_default';
 const APP_ID_PATTERN = /^[a-z0-9_-]+$/;
 const APP_ID_MAX_LEN = 64;
 
+// Phase 4 (Zone A migration Phase 2): `tenant_type` distinguishes operator
+// keys (5ceos kernel author, full /admin/* access) from subscriber keys.
+// Default 'subscriber'; explicit at issue time, never inferred. Legacy
+// records (pre-Phase-4) read as 'subscriber' via the read-time backfill
+// in verify() + findByEd25519KeyId(). The backfill is read-only — disk
+// records get the field on next mutating touch (rotate / verify migration).
+const TENANT_TYPES = new Set(['subscriber', 'operator']);
+const DEFAULT_TENANT_TYPE = 'subscriber';
+
+function normalizeTenantType(input) {
+  if (input == null || input === '') return DEFAULT_TENANT_TYPE;
+  if (typeof input !== 'string') throw new Error('tenant_type must be a string');
+  if (!TENANT_TYPES.has(input)) {
+    throw new Error(`tenant_type must be one of: ${[...TENANT_TYPES].join(', ')}`);
+  }
+  return input;
+}
+
 // Validate + normalize an app_id input. Returns DEFAULT_APP_ID for
 // null/undefined/empty. Throws on shape violations (slug-style only,
 // matches the same constraint we put on tenant_id implicitly throughout
@@ -188,6 +206,10 @@ function issue({
   // utm_campaign, utm_content, utm_term, ip, ts } — all fields optional.
   // Null = no attribution captured (e.g. operator-issued admin keys).
   signup_source = null,
+  // Phase 4 (Zone A migration Phase 2): role of the holding tenant.
+  // 'subscriber' = Zone B/C customer; 'operator' = 5ceos kernel author
+  // (full /admin/* access via dual-mode adminAuth). Default 'subscriber'.
+  tenant_type = DEFAULT_TENANT_TYPE,
 } = {}) {
   if (!tenantId) throw new Error('tenantId required');
   if (scheme !== 'bearer' && scheme !== 'ed25519') {
@@ -214,6 +236,7 @@ function issue({
   // Validate-and-normalize. Null/undefined/empty all collapse to
   // DEFAULT_APP_ID so callers who never pass app_id still get a sane tag.
   const resolvedAppId = normalizeAppId(app_id);
+  const resolvedTenantType = normalizeTenantType(tenant_type);
   const hmac_secret = newHmacSecret();
 
   // Branch on scheme. Both branches produce a record + a return payload
@@ -265,6 +288,7 @@ function issue({
     x25519_pubkey_pem,           // ed25519-only sealing pubkey; null for bearer
     hmac_secret_sealed,          // sealed envelope; replaces cleartext hmac_secret at rest
     tenant_id: tenantId,
+    tenant_type: resolvedTenantType,  // Phase 4: 'subscriber' | 'operator'
     app_id: resolvedAppId,       // partition key for audit chain + anomaly + future RBAC
     label,
     tier,
@@ -349,6 +373,9 @@ function findByEd25519KeyId(keyId) {
   const hmacCleartext = _decryptHmacSecret(found);
   if (hmacCleartext) out.hmac_secret = hmacCleartext;
   if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  // tenant_type read-time backfill — same semantics as the bearer verify()
+  // path; legacy ed25519 records arrive without the field.
+  if (out.tenant_type == null) out.tenant_type = DEFAULT_TENANT_TYPE;
   if (found.active && found.rotation_grace_until
       && nowMs <= found.rotation_grace_until) {
     out._rotation_grace = true;
@@ -483,6 +510,12 @@ function verify(plaintext) {
   // concrete app_id to usage.record() without a null-coalesce on every
   // hot-path request.
   if (out.app_id == null) out.app_id = DEFAULT_APP_ID;
+  // tenant_type read-time backfill (Phase 4): pre-Phase-4 records have
+  // no tenant_type. Treat absent as 'subscriber' so adminAuth dual-mode
+  // can safely test `req.apiKey.tenant_type === 'operator'` without
+  // null-coalesce. Disk record stays untagged until rotate / mutating
+  // touch upgrades the shape.
+  if (out.tenant_type == null) out.tenant_type = DEFAULT_TENANT_TYPE;
   if (found.rotation_grace_until && nowMs <= found.rotation_grace_until) {
     out._rotation_grace = true;
   }
@@ -727,6 +760,9 @@ module.exports = {
   findByEd25519KeyId,
   touchLastUsed,
   normalizeAppId,
+  normalizeTenantType,
+  TENANT_TYPES,
+  DEFAULT_TENANT_TYPE,
   PREFIX,
   DEFAULT_APP_ID,
   DEFAULT_KEY_LIFETIME_MS,

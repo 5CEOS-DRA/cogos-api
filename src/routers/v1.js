@@ -16,6 +16,7 @@ const express = require('express');
 const logger = require('../logger');
 const keys = require('../keys');
 const usage = require('../usage');
+const packages = require('../packages');
 const { proxyToPlatform } = require('../internal-trust');
 
 function makeV1Router({
@@ -38,6 +39,16 @@ function makeV1Router({
   // rotation/quarantine state can shift mid-session.
   router.get('/me', customerAuth, tenantLimiter, (req, res) => {
     const k = req.apiKey || {};
+    // Resolve the package (tier-cap) so /v1/me carries enough info for
+    // `cogos quota` to render usage-vs-cap without a second call.
+    // Best-effort · if packages substrate isn't seeded we still return
+    // the identity fields. Cycle start is the UTC month-start.
+    let pkg = null;
+    let cycle_start_ms = null;
+    try {
+      pkg = packages.resolveForKey(k);
+      cycle_start_ms = Date.parse(packages.currentBillingCycleStart());
+    } catch (_e) { /* substrate-not-bootstrapped path · degrade gracefully */ }
     res.set('Cache-Control', 'no-store');
     res.json({
       ok: true,
@@ -51,6 +62,11 @@ function makeV1Router({
       expires_at: k.expires_at,
       active: k.active !== false,
       rotation_grace: k._rotation_grace === true,
+      // Phase: surface tier-cap so `cogos quota` can render % used.
+      monthly_request_quota: pkg && pkg.monthly_request_quota || null,
+      allowed_model_tiers: pkg && pkg.allowed_model_tiers || null,
+      package_id: pkg && pkg.id || null,
+      cycle_start_ms,
     });
   });
   router.post(

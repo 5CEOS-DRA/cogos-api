@@ -133,3 +133,42 @@ describe('GET /v1/me', () => {
     expect(chainRowCount()).toBe(before);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Tier-cap fields (Phase: cogos quota visibility)
+// ─────────────────────────────────────────────────────────────────────
+
+test('GET /v1/me · surfaces monthly_request_quota + cycle_start_ms', async () => {
+  const app = freshApp();
+  const issued = await mintKey(app, 'quota-test');
+  const res = await request(app)
+    .get('/v1/me')
+    .set('Authorization', 'Bearer ' + issued.api_key);
+  expect(res.status).toBe(200);
+  // monthly_request_quota: a positive integer (or null if substrate not seeded)
+  if (res.body.monthly_request_quota !== null) {
+    expect(typeof res.body.monthly_request_quota).toBe('number');
+    expect(res.body.monthly_request_quota).toBeGreaterThan(0);
+  }
+  // cycle_start_ms: unix-ms timestamp of UTC month-start
+  if (res.body.cycle_start_ms !== null) {
+    expect(typeof res.body.cycle_start_ms).toBe('number');
+    const d = new Date(res.body.cycle_start_ms);
+    expect(d.getUTCDate()).toBe(1);
+    expect(d.getUTCHours()).toBe(0);
+    expect(d.getUTCMinutes()).toBe(0);
+  }
+});
+
+test('GET /v1/me · allowed_model_tiers is an array when present', async () => {
+  const app = freshApp();
+  const issued = await mintKey(app, 'tiers-test');
+  const res = await request(app)
+    .get('/v1/me')
+    .set('Authorization', 'Bearer ' + issued.api_key);
+  expect(res.status).toBe(200);
+  if (res.body.allowed_model_tiers !== null) {
+    expect(Array.isArray(res.body.allowed_model_tiers)).toBe(true);
+    expect(res.body.allowed_model_tiers.length).toBeGreaterThan(0);
+  }
+});

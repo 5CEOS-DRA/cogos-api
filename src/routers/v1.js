@@ -496,6 +496,39 @@ function makeV1Router({
       mutationType: 'import',
     })(req, res));
 
+  // GET /v1/viewports/:vid/sections/:section/rows/find · JSONB query
+  //
+  // Subscriber query primitive · forwards the `where` + `limit` query
+  // params through to platform's find endpoint. Read-only · no chain
+  // row · stripping client-supplied ?tenant + re-injecting from the
+  // sk-cogos-* key (same pattern as the other viewport reads).
+  router.get('/viewports/:vid/sections/:section/rows/find',
+    customerAuth, tenantLimiter, async (req, res) => {
+      const tenantId = req.apiKey && req.apiKey.tenant_id;
+      if (!tenantId) {
+        return res.status(401).json({
+          ok: false, error: { message: 'tenant context missing', type: 'auth_error' },
+        });
+      }
+      const params = [`tenant=${encodeURIComponent(tenantId)}`];
+      for (const [k, v] of Object.entries(req.query || {})) {
+        if (k === 'tenant') continue;
+        params.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+      }
+      const internalPath = `/viewports/${encodeURIComponent(req.params.vid)}/sections/${encodeURIComponent(req.params.section)}/rows/find?${params.join('&')}`;
+      try {
+        const r = await proxyToPlatform({ method: 'GET', path: '/api/internal' + internalPath });
+        const cacheControl = r.headers && (r.headers['cache-control'] || r.headers['Cache-Control']);
+        if (cacheControl) res.set('Cache-Control', cacheControl);
+        res.status(r.status).json(r.body);
+      } catch (e) {
+        logger.warn('row_find_proxy_failed', { error: e.message });
+        res.status(503).json({
+          ok: false, error: { message: 'row find temporarily unavailable', type: 'upstream_unavailable' },
+        });
+      }
+    });
+
   // GET /v1/intents — primitive catalog · Zone B subscriber surface.
   //
   // Validates sk-cogos-* via customerAuth, then proxies to platform

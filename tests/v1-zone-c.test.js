@@ -433,3 +433,124 @@ describe('Zone C · upstream failure', () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// GET /v1/viewports/:vid/sections/:section/rows/find · proxy
+// ─────────────────────────────────────────────────────────────────────
+
+describe('GET .../rows/find · proxy', () => {
+  test('unauthenticated → 401', async () => {
+    const app = createApp();
+    const r = await request(app)
+      .get(`/v1/viewports/${VP}/sections/tasks/rows/find?where=priority=high`);
+    expect(r.status).toBe(401);
+  });
+
+  test('happy · forwards where + limit · injects tenant in signed path', async () => {
+    let capturedUrl = null;
+    const { server, baseUrl } = await startPlatformStub((req, res) => {
+      capturedUrl = req.url;
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.setHeader('Cache-Control', 'no-store');
+      res.end(JSON.stringify({
+        ok: true, viewport_id: VP, section_id: 'tasks',
+        viewport_name: 'tasks', app_name: 'tasks',
+        where: { priority: 'high' },
+        rows: [
+          { id: 'r1', row: { title: 'A', priority: 'high' }, row_id_hash: 'sha256:1',
+            row_version: 'sha256:v1', created_at: new Date(), updated_at: new Date() },
+        ],
+        count: 1, limit: 10, truncated: false,
+      }));
+    });
+    const oldBase = process.env.PLATFORM_INTERNAL_BASE;
+    process.env.PLATFORM_INTERNAL_BASE = baseUrl;
+    try {
+      const app = createApp();
+      const tenant = 'tenant-find-' + Date.now();
+      const issued = await issueKey(app, tenant);
+      const res = await request(app)
+        .get(`/v1/viewports/${VP}/sections/tasks/rows/find?where=priority%3Dhigh&limit=10`)
+        .set('Authorization', 'Bearer ' + issued.api_key);
+      expect(res.status).toBe(200);
+      expect(res.body.count).toBe(1);
+      expect(res.body.rows[0].row.priority).toBe('high');
+      expect(res.headers['cache-control']).toBe('no-store');
+      // tenant injected into the signed canonical path
+      expect(capturedUrl).toContain(`tenant=${encodeURIComponent(tenant)}`);
+      // where + limit forwarded
+      expect(capturedUrl).toContain('where=priority%3Dhigh');
+      expect(capturedUrl).toContain('limit=10');
+    } finally {
+      server.close();
+      if (oldBase) process.env.PLATFORM_INTERNAL_BASE = oldBase;
+      else delete process.env.PLATFORM_INTERNAL_BASE;
+    }
+  });
+
+  test('client cannot override tenant in query · stripped + re-injected', async () => {
+    let capturedUrl = null;
+    const { server, baseUrl } = await startPlatformStub((req, res) => {
+      capturedUrl = req.url;
+      res.statusCode = 200;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: true, rows: [], count: 0 }));
+    });
+    const oldBase = process.env.PLATFORM_INTERNAL_BASE;
+    process.env.PLATFORM_INTERNAL_BASE = baseUrl;
+    try {
+      const app = createApp();
+      const myTenant = 'tenant-find-strip-' + Date.now();
+      const issued = await issueKey(app, myTenant);
+      await request(app)
+        .get(`/v1/viewports/${VP}/sections/tasks/rows/find?tenant=other-tenant&where=x%3D1`)
+        .set('Authorization', 'Bearer ' + issued.api_key);
+      expect(capturedUrl).toContain(encodeURIComponent(myTenant));
+      expect(capturedUrl).not.toContain('other-tenant');
+    } finally {
+      server.close();
+      if (oldBase) process.env.PLATFORM_INTERNAL_BASE = oldBase;
+      else delete process.env.PLATFORM_INTERNAL_BASE;
+    }
+  });
+
+  test('platform 400 (where_required) forwarded as-is', async () => {
+    const { server, baseUrl } = await startPlatformStub((_req, res) => {
+      res.statusCode = 400;
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify({ ok: false, error: 'where_required' }));
+    });
+    const oldBase = process.env.PLATFORM_INTERNAL_BASE;
+    process.env.PLATFORM_INTERNAL_BASE = baseUrl;
+    try {
+      const app = createApp();
+      const issued = await issueKey(app, 'tenant-find-noargs-' + Date.now());
+      const res = await request(app)
+        .get(`/v1/viewports/${VP}/sections/tasks/rows/find`)
+        .set('Authorization', 'Bearer ' + issued.api_key);
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('where_required');
+    } finally {
+      server.close();
+      if (oldBase) process.env.PLATFORM_INTERNAL_BASE = oldBase;
+      else delete process.env.PLATFORM_INTERNAL_BASE;
+    }
+  });
+
+  test('connection refused → 503', async () => {
+    const oldBase = process.env.PLATFORM_INTERNAL_BASE;
+    process.env.PLATFORM_INTERNAL_BASE = 'http://127.0.0.1:1';
+    try {
+      const app = createApp();
+      const issued = await issueKey(app, 'tenant-find-down-' + Date.now());
+      const res = await request(app)
+        .get(`/v1/viewports/${VP}/sections/tasks/rows/find?where=x%3D1`)
+        .set('Authorization', 'Bearer ' + issued.api_key);
+      expect(res.status).toBe(503);
+    } finally {
+      if (oldBase) process.env.PLATFORM_INTERNAL_BASE = oldBase;
+      else delete process.env.PLATFORM_INTERNAL_BASE;
+    }
+  });
+});

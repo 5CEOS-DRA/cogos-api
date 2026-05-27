@@ -16,6 +16,7 @@ const express = require('express');
 const logger = require('../logger');
 const keys = require('../keys');
 const usage = require('../usage');
+const { proxyToPlatform } = require('../internal-trust');
 
 function makeV1Router({
   customerAuth, tenantLimiter,
@@ -190,6 +191,34 @@ function makeV1Router({
       });
       res.status(400).json({
         error: { message: e.message, type: 'rotation_failed' },
+      });
+    }
+  });
+
+  // GET /v1/intents — primitive catalog · Zone B subscriber surface.
+  //
+  // Validates sk-cogos-* via customerAuth, then proxies to platform
+  // /api/internal/intents over the HMAC b-3 trust hop. Forwards the
+  // platform's catalog response as-is. Platform sets Cache-Control:
+  // max-age=300; we preserve that on the way out.
+  //
+  // Per project_cli_phase_2_acceptance_criteria_v0_1_2026_05_27 D
+  // + project_cli_zone_b_artifact_doctrine_2026_05_27.
+  router.get('/intents', customerAuth, tenantLimiter, async (_req, res) => {
+    try {
+      const r = await proxyToPlatform({
+        method: 'GET',
+        path: '/api/internal/intents',
+      });
+      // 503 upstream_unavailable comes from the proxy when the trust hop
+      // itself fails (HMAC misconfig / sig invalid) — surface as-is so the
+      // CLI can show a clean retry message instead of leaking HMAC details.
+      res.status(r.status).set('Cache-Control', 'max-age=300').json(r.body);
+    } catch (e) {
+      logger.warn('intents_proxy_failed', { error: e.message });
+      res.status(503).json({
+        ok: false,
+        error: { message: 'primitive catalog temporarily unavailable', type: 'upstream_unavailable' },
       });
     }
   });

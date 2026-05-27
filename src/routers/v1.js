@@ -26,6 +26,33 @@ function makeV1Router({
   const router = express.Router();
 
   router.get('/models', customerAuth, tenantLimiter, handleListModels);
+
+  // GET /v1/me — identity probe.
+  //
+  // Per Phase 4 acceptance criterion D: returns the caller's identity
+  // shape including tenant_type ('subscriber' | 'operator'). Used by
+  // CLI startup + `cogos doctor` identity probe so capability matrix
+  // populates per role.
+  //
+  // No state change; no chain row. Cache-Control: no-store because
+  // rotation/quarantine state can shift mid-session.
+  router.get('/me', customerAuth, tenantLimiter, (req, res) => {
+    const k = req.apiKey || {};
+    res.set('Cache-Control', 'no-store');
+    res.json({
+      ok: true,
+      tenant_id: k.tenant_id,
+      tenant_type: k.tenant_type || 'subscriber',
+      key_id: k.id,
+      app_id: k.app_id,
+      tier: k.tier,
+      scheme: k.scheme,
+      issued_at: k.issued_at,
+      expires_at: k.expires_at,
+      active: k.active !== false,
+      rotation_grace: k._rotation_grace === true,
+    });
+  });
   router.post(
     '/chat/completions',
     customerAuth, tenantLimiter,

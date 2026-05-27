@@ -355,6 +355,131 @@ function makeV1Router({
   router.get('/viewports/:id/rows', customerAuth, tenantLimiter,
     (req, res) => proxyViewportRead(`/viewports/${encodeURIComponent(req.params.id)}/rows`)(req, res));
 
+  // ── Zone C mutation surface (charter v0.2 + Phase 3 criteria F + H) ─
+  //
+  // POST   /v1/viewports/:vid/sections/:section/rows                  · add
+  // PUT    /v1/viewports/:vid/sections/:section/rows/:row_id          · update
+  // DELETE /v1/viewports/:vid/sections/:section/rows/:row_id          · delete
+  // POST   /v1/viewports/:vid/sections/:section/rows/import           · bulk
+  //
+  // Each proxies to platform /api/internal/viewports/... with the
+  // tenant slug injected. On 2xx success: appends a per-(tenant, app)
+  // mutation chain row via usage.record({mutation_type, viewport_id,
+  // section_id, row_version_before, row_version_after}) and returns
+  // chain_head_after in the response body. Per C-14 + criterion H.
+  //
+  // No chain row on non-2xx (matches Phase 1 admin + Phase 2 app push
+  // patterns — audit chain records successful state changes; failures
+  // surface to subscriber via the response and don't pollute the chain).
+
+  function recordZoneCMutation(req, mutationType, body, platformResp) {
+    const tenantId = req.apiKey && req.apiKey.tenant_id;
+    const appId = (platformResp && platformResp.app_name) || '_default';
+    const viewportId = platformResp && platformResp.viewport_id;
+    const sectionId = platformResp && platformResp.section_id;
+    // For 'add': row_version_before = null (genesis row entry).
+    // For 'update': platform doesn't return both versions in body; we
+    //               parse from request body's expected_version + response's
+    //               new row_version.
+    // For 'delete': row_version_after = null.
+    // For 'import': single chain row per batch; both versions null —
+    //               batch_summary in metadata.
+    let rowVersionBefore = null;
+    let rowVersionAfter = null;
+    if (mutationType === 'add') {
+      rowVersionAfter = platformResp && platformResp.row_version;
+    } else if (mutationType === 'update') {
+      rowVersionBefore = body && body.expected_version;
+      rowVersionAfter = platformResp && platformResp.row_version;
+    } else if (mutationType === 'delete') {
+      // expected_version came in via query; req.query.expected_version
+      rowVersionBefore = req.query && req.query.expected_version;
+    }
+    return usage.record({
+      key_id: req.apiKey.id,
+      tenant_id: tenantId,
+      app_id: appId,
+      route: `${req.method} ${req.route?.path || req.path}`,
+      status: 'success',
+      mutation_type: mutationType,
+      viewport_id: viewportId,
+      section_id: sectionId,
+      row_version_before: rowVersionBefore,
+      row_version_after: rowVersionAfter,
+    });
+  }
+
+  function proxyZoneCWrite({ method, internalPath, mutationType, queryExtra }) {
+    return async (req, res) => {
+      const tenantId = req.apiKey && req.apiKey.tenant_id;
+      if (!tenantId) {
+        return res.status(401).json({
+          ok: false, error: { message: 'tenant context missing', type: 'auth_error' },
+        });
+      }
+      const params = [`tenant=${encodeURIComponent(tenantId)}`];
+      if (queryExtra) params.push(queryExtra);
+      // Strip client-supplied ?tenant from query, forward other params
+      for (const [k, v] of Object.entries(req.query || {})) {
+        if (k === 'tenant') continue;
+        params.push(`${encodeURIComponent(k)}=${encodeURIComponent(String(v))}`);
+      }
+      const path = `/api/internal${internalPath}?${params.join('&')}`;
+      try {
+        const r = await proxyToPlatform({
+          method,
+          path,
+          bodyJson: req.body,
+        });
+        const isSuccess = r.status >= 200 && r.status < 300;
+        if (isSuccess) {
+          const chainHead = recordZoneCMutation(req, mutationType, req.body, r.body || {});
+          const body = (r.body && typeof r.body === 'object') ? { ...r.body } : {};
+          body.chain_head_after = chainHead;
+          return res.status(r.status).set('Cache-Control', 'no-store').json(body);
+        }
+        return res.status(r.status).set('Cache-Control', 'no-store').json(r.body || { ok: false });
+      } catch (e) {
+        logger.warn('zone_c_proxy_failed', { path, error: e.message });
+        return res.status(503).json({
+          ok: false, error: { message: 'row mutation temporarily unavailable', type: 'upstream_unavailable' },
+        });
+      }
+    };
+  }
+
+  router.post('/viewports/:vid/sections/:section/rows',
+    customerAuth, tenantLimiter,
+    (req, res) => proxyZoneCWrite({
+      method: 'POST',
+      internalPath: `/viewports/${encodeURIComponent(req.params.vid)}/sections/${encodeURIComponent(req.params.section)}/rows`,
+      mutationType: 'add',
+    })(req, res));
+
+  router.put('/viewports/:vid/sections/:section/rows/:row_id',
+    customerAuth, tenantLimiter,
+    (req, res) => proxyZoneCWrite({
+      method: 'PUT',
+      internalPath: `/viewports/${encodeURIComponent(req.params.vid)}/sections/${encodeURIComponent(req.params.section)}/rows/${encodeURIComponent(req.params.row_id)}`,
+      mutationType: 'update',
+    })(req, res));
+
+  router.delete('/viewports/:vid/sections/:section/rows/:row_id',
+    customerAuth, tenantLimiter,
+    (req, res) => proxyZoneCWrite({
+      method: 'DELETE',
+      internalPath: `/viewports/${encodeURIComponent(req.params.vid)}/sections/${encodeURIComponent(req.params.section)}/rows/${encodeURIComponent(req.params.row_id)}`,
+      mutationType: 'delete',
+    })(req, res));
+
+  router.post('/viewports/:vid/sections/:section/rows/import',
+    customerAuth, tenantLimiter,
+    (req, res) => proxyZoneCWrite({
+      method: 'POST',
+      internalPath: `/viewports/${encodeURIComponent(req.params.vid)}/sections/${encodeURIComponent(req.params.section)}/rows/import`,
+      mutationType: 'import',
+    })(req, res));
+
   // GET /v1/intents — primitive catalog · Zone B subscriber surface.
   //
   // Validates sk-cogos-* via customerAuth, then proxies to platform

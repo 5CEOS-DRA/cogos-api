@@ -235,6 +235,92 @@ function makeV1Router({
     };
   }
 
+  // POST /v1/apps/build · subscriber app push.
+  // GET  /v1/apps/build/:id · build status poll.
+  //
+  // Push is a state-changing write — chain row appended on success and
+  // chain_head_after returned. Status is read-only and doesn't chain.
+  //
+  // Per Phase 2 acceptance criteria D (commands) + G (receipt arc
+  // anchoring on state change).
+  function slugifyAppName(name) {
+    return String(name || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_|_$/g, '');
+  }
+
+  router.post('/apps/build', customerAuth, tenantLimiter, async (req, res) => {
+    const tenantId = req.apiKey && req.apiKey.tenant_id;
+    if (!tenantId) {
+      return res.status(401).json({
+        ok: false, error: { message: 'tenant context missing', type: 'auth_error' },
+      });
+    }
+
+    const blueprint = req.body && req.body.blueprint;
+    if (!blueprint || typeof blueprint !== 'object') {
+      return res.status(400).json({
+        ok: false, error: { message: 'request body must include a `blueprint` object', type: 'invalid_request_error' },
+      });
+    }
+
+    const appId = slugifyAppName(blueprint.name) || '_default';
+
+    let r;
+    try {
+      r = await proxyToPlatform({
+        method: 'POST',
+        path: `/api/internal/apps/build?tenant=${encodeURIComponent(tenantId)}`,
+        bodyJson: { blueprint },
+      });
+    } catch (e) {
+      logger.warn('app_push_proxy_failed', { error: e.message });
+      return res.status(503).json({
+        ok: false, error: { message: 'build service temporarily unavailable', type: 'upstream_unavailable' },
+      });
+    }
+
+    const isSuccess = r.status >= 200 && r.status < 300;
+    if (isSuccess) {
+      const chainHead = usage.record({
+        key_id: req.apiKey.id,
+        tenant_id: tenantId,
+        app_id: appId,
+        route: 'POST /v1/apps/build',
+        status: 'success',
+      });
+      const body = (r.body && typeof r.body === 'object') ? { ...r.body } : {};
+      body.chain_head_after = chainHead;
+      return res.status(r.status).set('Cache-Control', 'no-store').json(body);
+    }
+    // Non-success: forward platform response shape as-is (validation
+    // diagnostics, 503 upstream_unavailable, etc.). No chain row —
+    // matches the admin.js Phase 1 pattern.
+    return res.status(r.status).set('Cache-Control', 'no-store').json(r.body || { ok: false });
+  });
+
+  router.get('/apps/build/:id', customerAuth, tenantLimiter, async (req, res) => {
+    const tenantId = req.apiKey && req.apiKey.tenant_id;
+    if (!tenantId) {
+      return res.status(401).json({
+        ok: false, error: { message: 'tenant context missing', type: 'auth_error' },
+      });
+    }
+    const path = `/api/internal/apps/build/${encodeURIComponent(req.params.id)}?tenant=${encodeURIComponent(tenantId)}`;
+    try {
+      const r = await proxyToPlatform({ method: 'GET', path });
+      const cacheControl = r.headers && (r.headers['cache-control'] || r.headers['Cache-Control']);
+      if (cacheControl) res.set('Cache-Control', cacheControl);
+      res.status(r.status).json(r.body);
+    } catch (e) {
+      logger.warn('app_status_proxy_failed', { error: e.message });
+      res.status(503).json({
+        ok: false, error: { message: 'build status temporarily unavailable', type: 'upstream_unavailable' },
+      });
+    }
+  });
+
   router.get('/viewports', customerAuth, tenantLimiter,
     proxyViewportRead('/viewports'));
   router.get('/viewports/:id', customerAuth, tenantLimiter,

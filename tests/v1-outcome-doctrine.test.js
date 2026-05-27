@@ -37,6 +37,7 @@ function stripComments(src) {
 const FILES_UNDER_GUARD = [
   path.join(__dirname, '..', 'src', 'routers', 'v1.js'),
   path.join(__dirname, '..', 'src', 'internal-trust.js'),
+  path.join(__dirname, '..', 'src', 'usage.js'),  // Phase 3: extended for Zone C mutation chain
 ];
 
 describe('Outcome Doctrine compliance — Phase 2 v1 + internal-trust', () => {

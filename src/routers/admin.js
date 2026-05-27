@@ -30,6 +30,37 @@ const auditCheckpoint = require('../audit-checkpoint');
 // data dir is two levels up.
 const REPO_ROOT = path.join(__dirname, '..', '..');
 
+// Sentinel slug for admin actions in the audit chain. Per
+// project_zone_a_phased_migration_doctrine_2026_05_27 Phase 1: admin
+// mutations append a hash-chained row to usage.jsonl under tenant_id
+// '_operator' so operator actions become cryptographically attributable
+// alongside customer chains. Phase 4 will replace this sentinel with
+// per-operator tenant_id attribution when tenant_type='operator' lands;
+// '_operator' rows stay valid (chain epoch boundary doctrine).
+//
+// Pre-multi-app rows in legacy customer chains use real tenant_ids;
+// '_operator' is reserved namespace — no real tenant uses underscore-
+// prefix slugs.
+const OPERATOR_SENTINEL_TENANT = '_operator';
+
+// Append an admin mutation to the _operator audit chain. Returns the new
+// chain head so the handler can surface chain_head_after in the response
+// body. Read-only admin endpoints don't call this — only state-changing
+// mutations (per Phase 1 acceptance criteria A).
+function recordAdminMutation(req, status = 'success') {
+  return usage.record({
+    tenant_id: OPERATOR_SENTINEL_TENANT,
+    key_id: null,         // admin actions have no req.apiKey.id
+    route: req.method + ' ' + (req.route?.path
+      ? '/admin' + req.route.path
+      : req.originalUrl),
+    status,
+    prompt_tokens: 0,
+    completion_tokens: 0,
+    latency_ms: 0,
+  });
+}
+
 function makeAdminRouter({ adminAuth }) {
   const router = express.Router();
 
@@ -106,6 +137,7 @@ function makeAdminRouter({ adminAuth }) {
         + 'and x25519_private_pem (audit decryption) will not be shown '
         + 'again — they are NOT stored server-side.';
     }
+    response.chain_head_after = recordAdminMutation(req);
     res.status(201).json(response);
   });
 
@@ -117,7 +149,8 @@ function makeAdminRouter({ adminAuth }) {
     const ok = keys.revoke(req.params.id);
     if (!ok) return res.status(404).json({ error: { message: 'Key not found' } });
     logger.info('key_revoked', { id: req.params.id });
-    res.json({ revoked: true, key_id: req.params.id });
+    const chain_head_after = recordAdminMutation(req);
+    res.json({ revoked: true, key_id: req.params.id, chain_head_after });
   });
 
   // ---- Quarantine surfaces ----
@@ -139,7 +172,8 @@ function makeAdminRouter({ adminAuth }) {
       return res.status(500).json({ error: { message: 'clearQuarantine failed unexpectedly' } });
     }
     logger.info('key_quarantine_cleared', { id });
-    res.json({ cleared: true, key_id: id });
+    const chain_head_after = recordAdminMutation(req);
+    res.json({ cleared: true, key_id: id, chain_head_after });
   });
 
   // ---- Usage log (?since=<unix-ms>) ----
@@ -166,7 +200,8 @@ function makeAdminRouter({ adminAuth }) {
   router.post('/packages', adminAuth, async (req, res) => {
     try {
       const pkg = await packages.create(req.body || {});
-      res.status(201).json({ package: pkg });
+      const chain_head_after = recordAdminMutation(req);
+      res.status(201).json({ package: pkg, chain_head_after });
     } catch (e) {
       const status = e.code === 'duplicate_id' ? 409
         : e.code === 'validation_failed' ? 400 : 500;
@@ -180,7 +215,8 @@ function makeAdminRouter({ adminAuth }) {
   router.put('/packages/:id', adminAuth, async (req, res) => {
     try {
       const pkg = await packages.update(req.params.id, req.body || {});
-      res.json({ package: pkg });
+      const chain_head_after = recordAdminMutation(req);
+      res.json({ package: pkg, chain_head_after });
     } catch (e) {
       const status = e.code === 'not_found' ? 404
         : e.code === 'validation_failed' ? 400 : 500;
@@ -195,7 +231,8 @@ function makeAdminRouter({ adminAuth }) {
     try {
       const ok = await packages.softDelete(req.params.id);
       if (!ok) return res.status(404).json({ error: { message: 'Package not found' } });
-      res.json({ deactivated: true, id: req.params.id });
+      const chain_head_after = recordAdminMutation(req);
+      res.json({ deactivated: true, id: req.params.id, chain_head_after });
     } catch (e) {
       const status = e.code === 'is_default' ? 409 : 500;
       logger.warn('admin_packages_delete_failed', { id: req.params.id, error: e.message });

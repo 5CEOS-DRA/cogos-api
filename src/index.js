@@ -26,6 +26,8 @@ const { makeAuditCheckpointRouter } = require('./routers/audit-checkpoint');
 const { makePublicContentRouter } = require('./routers/public-content');
 const { makeV1Router } = require('./routers/v1');
 const { makeProcessRouter } = require('./routers/process');
+const { makeSearchRouter } = require('./routers/search');
+const { makeChatGroundedRouter } = require('./routers/chat-grounded');
 const { makeComposeRouter } = require('./routers/compose');
 const { makeStateRouter } = require('./routers/state');
 const { makeAdminRouter } = require('./routers/admin');
@@ -980,6 +982,24 @@ function createApp() {
   // public catalog page at #/cogos/processes on the platform lists what's
   // available and what's on the roadmap.
   app.use('/v1/process', makeProcessRouter({ customerAuth, tenantLimiter }));
+
+  // ---- /v1/search · receipt-bearing live-web search ----
+  // Sovereign LLM reaches the open internet on demand for facts the
+  // model couldn't have at training time. Every fetch returns a receipt
+  // on the same hash-chained usage spine as /v1/chat and /v1/process,
+  // so customers can replay months later and prove which sources the
+  // substrate consulted. provider:'none' when BRAVE_SEARCH_API_KEY is
+  // unset (fail-soft, still receipt-bearing).
+  app.use('/v1/search', makeSearchRouter({ customerAuth, tenantLimiter }));
+
+  // ---- /v1/chat-grounded · search-augmented LLM with unified receipt ----
+  // Single endpoint that orchestrates /v1/search + sovereign LLM on the
+  // substrate side. Heuristic-decides whether to search (mode=auto), or
+  // explicit via mode=always-search / never-search. Output_hash binds the
+  // answer to its citations as one indivisible artifact. ONE usage row
+  // per call regardless of internal sub-operations; evidence_chain in the
+  // receipt carries sub-operation trace IDs for re-derivation.
+  app.use('/v1/chat-grounded', makeChatGroundedRouter({ customerAuth, tenantLimiter }));
 
   // ---- /v1/compose · multi-step deterministic workflow surface ----
   // Linear-sequence composition of registered processes with end-to-end

@@ -69,6 +69,16 @@ function sha256Hex(s) {
   return crypto.createHash('sha256').update(s).digest('hex');
 }
 
+// Per CE-I2 of COGOS_COMPOSE_EXTENSIONS_DOCTRINE_v0.1.
+// Deterministic placeholder hash for a step that failed under
+// on_error:"continue". Depends ONLY on the step's declared name and
+// position — NOT on the runtime error. Two runs where step i fails
+// the same way produce the same chain_hash for step i. Per CE-HN-4
+// the error message MUST NOT be hashed into the chain.
+function failureOutputHash(stepIndex, name) {
+  return canonicalHash({ failed: true, step: stepIndex, name: String(name) });
+}
+
 /**
  * Resolve a dot-path against an object · "rows.0.rule_id" etc.
  * Returns undefined when the path doesn't resolve.
@@ -138,6 +148,10 @@ function validateSteps(steps) {
     if (s.refs != null && typeof s.refs !== 'object') {
       throw new TypeError(`compose: step ${i}.refs must be an object (or absent)`);
     }
+    // CE-Doctrine §5 · per-step failure mode.
+    if (s.on_error != null && s.on_error !== 'fail' && s.on_error !== 'continue') {
+      throw new TypeError(`compose: step ${i}.on_error must be "fail" or "continue" (or absent)`);
+    }
   }
 }
 
@@ -162,58 +176,126 @@ async function compose(steps, runStep) {
   // sequence of outputs."
   const workflowHash = canonicalHash(steps);
 
-  const results = [];
-  const chain = [];
-  let prevChainHash = workflowHash;
+  const results       = [];
+  const chain         = [];
+  const failed_steps  = [];   // CE-I3 · parallel to chain[]; not hashed
+  let   prevChainHash = workflowHash;
 
   for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
+    const step    = steps[i];
+    const onError = step.on_error || 'fail';   // CE §5
+
+    // ── ref-cascade check (CE-I4) ──────────────────────────────────
+    // If any ref points at a step whose results[N] is null (failed
+    // under continue), short-circuit BEFORE applyRefs.
+    let preErr = null;
+    if (step.refs && typeof step.refs === 'object') {
+      for (const [argKey, ref] of Object.entries(step.refs)) {
+        if (ref && Number.isInteger(ref.from_step)
+            && ref.from_step >= 0 && ref.from_step < results.length
+            && results[ref.from_step] === null) {
+          preErr = new TypeError(
+            `compose: step ${i} ref "${argKey}".from_step (${ref.from_step}) references a failed step`
+          );
+          preErr.code = 'REF_DEPENDS_ON_FAILED_STEP';
+          break;
+        }
+      }
+    }
+
+    // ── ref resolution ─────────────────────────────────────────────
     let resolvedArgs;
-    try {
-      resolvedArgs = applyRefs(step.args || {}, step.refs, results);
-    } catch (e) {
-      const err = new Error(`compose: step ${i} ref resolution failed · ${e.message}`);
-      err.failed_step = i;
-      err.partial_chain = chain.slice();
-      err.partial_results = results.slice();
+    if (!preErr) {
+      try {
+        resolvedArgs = applyRefs(step.args || {}, step.refs, results);
+      } catch (e) {
+        preErr = e;
+      }
+    }
+
+    if (preErr) {
+      if (onError === 'continue') {
+        prevChainHash = recordFailure(i, step.name, preErr, 'continue',
+          { chain, results, failed_steps }, prevChainHash);
+        continue;
+      }
+      const err = new Error(`compose: step ${i} ref resolution failed · ${preErr.message}`);
+      err.failed_step      = i;
+      err.partial_chain    = chain.slice();
+      err.partial_results  = results.slice();
       throw err;
     }
 
+    // ── step execution ─────────────────────────────────────────────
     let result;
     try {
       result = await runStep(step.name, resolvedArgs);
     } catch (e) {
+      if (onError === 'continue') {
+        prevChainHash = recordFailure(i, step.name, e, 'continue',
+          { chain, results, failed_steps }, prevChainHash);
+        continue;
+      }
       const err = new Error(`compose: step ${i} (${step.name}) failed · ${e.message}`);
-      err.failed_step = i;
-      err.failed_step_name = step.name;
-      err.partial_chain = chain.slice();
-      err.partial_results = results.slice();
-      err.cause = e;
+      err.failed_step       = i;
+      err.failed_step_name  = step.name;
+      err.partial_chain     = chain.slice();
+      err.partial_results   = results.slice();
+      err.cause             = e;
       throw err;
     }
 
+    // ── success path · BYTE-IDENTICAL to v0.0 (CE-I1) ──────────────
     const canonicalResult = canonicalize(result);
-    const stepOutputHash = canonicalHash(canonicalResult);
-    const chainHash = 'sha256:' + sha256Hex(prevChainHash + stepOutputHash);
+    const stepOutputHash  = canonicalHash(canonicalResult);
+    const chainHash       = 'sha256:' + sha256Hex(prevChainHash + stepOutputHash);
 
     results.push(canonicalResult);
     chain.push({
       step: i,
       name: step.name,
-      output_hash: stepOutputHash,
+      output_hash:     stepOutputHash,
       prev_chain_hash: prevChainHash,
-      chain_hash: chainHash,
+      chain_hash:      chainHash,
     });
     prevChainHash = chainHash;
   }
 
   return {
     composition_version: COMPOSITION_VERSION,
-    workflow_hash: workflowHash,
+    workflow_hash:       workflowHash,
     results,
     chain,
-    compose_hash: prevChainHash,
+    failed_steps,                       // CE-I3 · always present (empty when no failures)
+    compose_hash:        prevChainHash,
   };
+}
+
+// Per CE-I2/CE-I3/CE-HN-4. Appends a failure-shaped chain entry +
+// a null to results[] + a detail entry to failed_steps[]. Returns the
+// new prevChainHash. Caller assigns; we don't mutate caller's local.
+function recordFailure(i, name, err, mode, acc, prevChainHash) {
+  const outHash   = failureOutputHash(i, name);
+  const chainHash = 'sha256:' + sha256Hex(prevChainHash + outHash);
+  acc.chain.push({
+    step: i,
+    name,
+    output_hash:     outHash,
+    prev_chain_hash: prevChainHash,
+    chain_hash:      chainHash,
+    status:          'failed',          // CE §6 structural marker
+  });
+  acc.results.push(null);
+  acc.failed_steps.push({
+    step: i,
+    name,
+    on_error: mode,
+    error: {
+      message: err && err.message ? String(err.message) : 'unknown error',
+      code:    err && err.code ? String(err.code) : 'step_execution_failed',
+    },
+  });
+  return chainHash;
 }
 
 module.exports = {

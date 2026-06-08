@@ -290,11 +290,20 @@ function makeAdminRouter({ adminAuth }) {
     const costOutPer1M = Number(process.env.FRONTIER_COST_OUTPUT_USD_PER_1M || 0.30);
     const freeRpd      = Number(process.env.FRONTIER_FREE_TIER_RPD          || 1500);
 
-    const rows = usage.readAll().filter((r) => {
-      if (!r.was_escalated) return false;
+    // Two passes over the audit log: total calls in window (denominator)
+    // and escalated subset (numerator). Doing this in one filter to avoid
+    // re-reading the file.
+    const allRows = usage.readAll();
+    let total_calls_in_window = 0;
+    let sovereign_success = 0;
+    const rows = [];
+    for (const r of allRows) {
       const ts = new Date(r.ts).getTime();
-      return ts >= sinceMs && ts <= untilMs;
-    });
+      if (ts < sinceMs || ts > untilMs) continue;
+      total_calls_in_window += 1;
+      if (r.was_escalated) rows.push(r);
+      else if (r.status === 'success') sovereign_success += 1;
+    }
 
     const by_reason = {};
     const by_provider = {};
@@ -329,6 +338,16 @@ function makeAdminRouter({ adminAuth }) {
     const billable_calls_per_day = Math.max(0, calls_per_day - freeRpd);
     const billable_fraction = calls_per_day > 0 ? billable_calls_per_day / calls_per_day : 0;
 
+    // Escalation rate · the headline metric. Numerator: escalated calls.
+    // Denominator: ALL calls in the same window (sovereign + escalated +
+    // errored). CL-NEVER-1 target is ≥99% sovereign / <1% escalated.
+    const escalation_rate_pct = total_calls_in_window > 0
+      ? (rows.length / total_calls_in_window) * 100
+      : 0;
+    const sovereign_rate_pct = total_calls_in_window > 0
+      ? ((total_calls_in_window - rows.length) / total_calls_in_window) * 100
+      : 100;
+
     res.json({
       ok: true,
       period: {
@@ -336,7 +355,12 @@ function makeAdminRouter({ adminAuth }) {
         until: new Date(untilMs).toISOString(),
         window_days: Number(windowDays.toFixed(2)),
       },
+      total_calls: total_calls_in_window,
       total_escalations: rows.length,
+      sovereign_success_count: sovereign_success,
+      escalation_rate_pct: Number(escalation_rate_pct.toFixed(4)),
+      sovereign_rate_pct: Number(sovereign_rate_pct.toFixed(4)),
+      target_sovereign_rate_pct: 99,  // CL-NEVER-1 rev 2026-06-06
       unique_tenants: tenants.size,
       by_reason,
       by_provider,

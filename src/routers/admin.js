@@ -220,6 +220,158 @@ function makeAdminRouter({ adminAuth }) {
     });
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // GET /admin/escalation-learning
+  // GET /admin/escalation-learning/summary
+  //
+  // Phase 1 of the learning loop. Returns the (prompt → frontier response)
+  // pairs captured during substrate-automatic escalation. Operator-only.
+  // The dataset is the raw material for downstream phases (cache, tier
+  // promotion, periodic Qwen fine-tuning).
+  //
+  // Query params for /escalation-learning:
+  //   ?limit=N        · default 100, cap raised to 1000 to keep memory bounded
+  //   ?tenant_id=X    · filter to one tenant
+  //   ?since=<ms>     · drop rows older than this epoch-ms
+  // ─────────────────────────────────────────────────────────────────
+  const escalationLearning = require('../escalation-learning');
+
+  router.get('/escalation-learning', adminAuth, cacheNoStore, (req, res) => {
+    const limit = Math.min(1000, Number(req.query.limit) || 100);
+    const tenant_id = req.query.tenant_id ? String(req.query.tenant_id) : null;
+    const since = req.query.since ? Number(req.query.since) : null;
+    const rows = escalationLearning.read({ limit, tenant_id, since });
+    res.json({
+      ok: true,
+      count: rows.length,
+      rows,
+      server_time_ms: Date.now(),
+    });
+  });
+
+  router.get('/escalation-learning/summary', adminAuth, cacheNoStore, (req, res) => {
+    const sum = escalationLearning.summary();
+    if (!sum) return res.status(500).json({ ok: false, error: 'summary failed' });
+    res.json({ ok: true, ...sum, server_time_ms: Date.now() });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // GET /admin/escalation-metrics
+  // ─────────────────────────────────────────────────────────────────
+  //
+  // Substrate-side source of truth for frontier (Gemini) usage + cost.
+  // Aggregates only rows where was_escalated === true. Returns:
+  //   - total_escalations         · count of all escalated calls
+  //   - by_reason                 · counts grouped by escalation_reason
+  //   - by_provider               · counts grouped by frontier_provider
+  //   - tokens                    · sum of prompt + completion (in/out)
+  //   - cost                      · estimated $ at configured rates
+  //   - free_tier_projection      · best-effort split of billable vs free
+  //   - period                    · {since, until} (default last 30d)
+  //
+  // Independent of any third-party billing UI. Operator can hit this
+  // any time to know "how much Gemini, how much $" from the audit chain.
+  // Query params:
+  //   ?since=<iso8601 or ms>      · start of window (default 30d ago)
+  //   ?until=<iso8601 or ms>      · end of window (default now)
+  router.get('/escalation-metrics', adminAuth, cacheNoStore, (req, res) => {
+    const now = Date.now();
+    const parseTs = (v, fallback) => {
+      if (!v) return fallback;
+      const n = Number(v);
+      if (!isNaN(n) && n > 0) return n;
+      const d = new Date(String(v)).getTime();
+      return isNaN(d) ? fallback : d;
+    };
+    const sinceMs = parseTs(req.query.since, now - 30 * 24 * 60 * 60 * 1000);
+    const untilMs = parseTs(req.query.until, now);
+
+    const costInPer1M  = Number(process.env.FRONTIER_COST_INPUT_USD_PER_1M  || 0.075);
+    const costOutPer1M = Number(process.env.FRONTIER_COST_OUTPUT_USD_PER_1M || 0.30);
+    const freeRpd      = Number(process.env.FRONTIER_FREE_TIER_RPD          || 1500);
+
+    const rows = usage.readAll().filter((r) => {
+      if (!r.was_escalated) return false;
+      const ts = new Date(r.ts).getTime();
+      return ts >= sinceMs && ts <= untilMs;
+    });
+
+    const by_reason = {};
+    const by_provider = {};
+    const by_day = {};
+    let prompt_tokens = 0;
+    let completion_tokens = 0;
+    let latency_total_ms = 0;
+    const tenants = new Set();
+
+    for (const r of rows) {
+      by_reason[r.escalation_reason || 'unknown']   = (by_reason[r.escalation_reason || 'unknown']   || 0) + 1;
+      by_provider[r.frontier_provider || 'unknown'] = (by_provider[r.frontier_provider || 'unknown'] || 0) + 1;
+      const day = (r.ts || '').slice(0, 10);
+      by_day[day] = (by_day[day] || 0) + 1;
+      prompt_tokens     += Number(r.prompt_tokens || 0);
+      completion_tokens += Number(r.completion_tokens || 0);
+      latency_total_ms  += Number(r.latency_ms || 0);
+      if (r.tenant_id) tenants.add(r.tenant_id);
+    }
+
+    const cost_in_usd  = (prompt_tokens     / 1_000_000) * costInPer1M;
+    const cost_out_usd = (completion_tokens / 1_000_000) * costOutPer1M;
+    const cost_total_usd = cost_in_usd + cost_out_usd;
+
+    // Free-tier projection. Google bills past 1500 RPD on Flash free
+    // tier; below that, the call is no-charge. We compute the avg
+    // calls/day in the window and project the billable fraction.
+    // This is illustrative; the operator's actual Google billing is
+    // the source of truth for $.
+    const windowDays = Math.max(1, (untilMs - sinceMs) / (24 * 60 * 60 * 1000));
+    const calls_per_day = rows.length / windowDays;
+    const billable_calls_per_day = Math.max(0, calls_per_day - freeRpd);
+    const billable_fraction = calls_per_day > 0 ? billable_calls_per_day / calls_per_day : 0;
+
+    res.json({
+      ok: true,
+      period: {
+        since: new Date(sinceMs).toISOString(),
+        until: new Date(untilMs).toISOString(),
+        window_days: Number(windowDays.toFixed(2)),
+      },
+      total_escalations: rows.length,
+      unique_tenants: tenants.size,
+      by_reason,
+      by_provider,
+      by_day,
+      tokens: {
+        prompt: prompt_tokens,
+        completion: completion_tokens,
+        total: prompt_tokens + completion_tokens,
+      },
+      latency_ms: {
+        total: latency_total_ms,
+        avg: rows.length > 0 ? Math.round(latency_total_ms / rows.length) : 0,
+      },
+      cost: {
+        input_usd:  Number(cost_in_usd.toFixed(6)),
+        output_usd: Number(cost_out_usd.toFixed(6)),
+        total_usd:  Number(cost_total_usd.toFixed(6)),
+        rates: {
+          input_usd_per_1m:  costInPer1M,
+          output_usd_per_1m: costOutPer1M,
+          source: 'env(FRONTIER_COST_*_USD_PER_1M)',
+        },
+      },
+      free_tier_projection: {
+        free_tier_rpd: freeRpd,
+        calls_per_day: Number(calls_per_day.toFixed(2)),
+        billable_calls_per_day: Number(billable_calls_per_day.toFixed(2)),
+        estimated_billable_fraction: Number(billable_fraction.toFixed(4)),
+        estimated_billable_cost_usd: Number((cost_total_usd * billable_fraction).toFixed(6)),
+        note: 'Illustrative split. Google billing dashboard is source of truth for $.',
+      },
+      server_time_ms: Date.now(),
+    });
+  });
+
   // ---- Packages CRUD ----
   router.get('/packages', adminAuth, cacheNoStore, (req, res) => {
     const includeInactive = req.query.include_inactive === '1';

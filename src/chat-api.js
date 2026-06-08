@@ -424,6 +424,83 @@ async function callUpstream(args) {
   return UPSTREAM_PROVIDER() === 'openai' ? callOpenAI(args) : callOllama(args);
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Frontier escalation · CL-NEVER-1 rev 2026-06-06
+// ─────────────────────────────────────────────────────────────────────
+//
+// Substrate-automatic escalation to a frontier provider when the
+// sovereign tier (Ollama) cannot resolve a call. Default provider is
+// Gemini via Google's OpenAI-compatible endpoint so the same
+// chat-completions payload shape works. Configured via FRONTIER_*
+// env vars; disable via FRONTIER_ESCALATION_ENABLED=false.
+//
+// Trigger conditions (v1):
+//   sovereign_error     — upstream threw (network, DNS, etc.) OR
+//                         returned non-2xx
+//   sovereign_timeout   — currently subsumed by sovereign_error
+//                         (Axios timeout surfaces as a throw)
+//   manual_override     — caller sent X-Cogos-Escalate: 1 header
+//
+// Not yet wired (v2):
+//   sovereign_refusal   — needs response-content classifier
+//   low_confidence      — needs confidence-score telemetry
+//   schema_invalid      — needs schema-validation hook on response
+//
+// The frontier call rides through callOpenAI() because Gemini exposes
+// an OpenAI-compatible v1beta/openai/ endpoint that takes the same
+// payload shape. Per memory: gemini-2.5-flash works on free tier with
+// the personal-account API key (AQ. prefix).
+
+const FRONTIER_ENABLED = () =>
+  (process.env.FRONTIER_ESCALATION_ENABLED || 'true').toLowerCase() !== 'false';
+const FRONTIER_PROVIDER_NAME = () => process.env.FRONTIER_PROVIDER || 'gemini';
+const FRONTIER_API_BASE_URL = () => process.env.FRONTIER_API_BASE || '';
+const FRONTIER_API_KEY_VAL = () => process.env.FRONTIER_API_KEY || '';
+const FRONTIER_MODEL_NAME = () => process.env.FRONTIER_MODEL || 'gemini-2.5-flash';
+const FRONTIER_TIMEOUT = () => Number(process.env.FRONTIER_TIMEOUT_MS) || 30000;
+
+const ALLOWED_ESCALATION_REASONS = new Set([
+  'sovereign_refusal', 'sovereign_timeout', 'sovereign_error',
+  'low_confidence', 'schema_invalid', 'manual_override',
+]);
+
+async function callFrontier({ messages, schema, temperature, max_tokens, seed }) {
+  const baseUrl = FRONTIER_API_BASE_URL();
+  const key = FRONTIER_API_KEY_VAL();
+  if (!baseUrl || !key) {
+    return { ok: false, reason: 'frontier_not_configured' };
+  }
+  const oldTimeout = process.env.INFERENCE_TIMEOUT_MS;
+  process.env.INFERENCE_TIMEOUT_MS = String(FRONTIER_TIMEOUT());
+  try {
+    const res = await callOpenAI({
+      url: baseUrl,
+      key,
+      model: FRONTIER_MODEL_NAME(),
+      messages, schema, temperature, max_tokens, seed,
+    });
+    return res.parsed
+      ? { ok: true, status: res.status, parsed: res.parsed, data: res.data }
+      : { ok: false, reason: 'frontier_non_2xx', status: res.status, data: res.data };
+  } catch (e) {
+    return { ok: false, reason: 'frontier_threw', error: e.message };
+  } finally {
+    if (oldTimeout != null) process.env.INFERENCE_TIMEOUT_MS = oldTimeout;
+    else delete process.env.INFERENCE_TIMEOUT_MS;
+  }
+}
+
+// Decide whether this request qualifies for substrate-automatic
+// escalation. The caller has already established sovereign failure;
+// this fn just validates policy: feature flag on, frontier configured,
+// reason is in the canonical vocabulary.
+function escalationAllowed(reason) {
+  if (!FRONTIER_ENABLED()) return false;
+  if (!FRONTIER_API_BASE_URL() || !FRONTIER_API_KEY_VAL()) return false;
+  if (!ALLOWED_ESCALATION_REASONS.has(reason)) return false;
+  return true;
+}
+
 async function handleChatCompletions(req, res) {
   const body = req.body || {};
   const messages = body.messages;
@@ -439,6 +516,13 @@ async function handleChatCompletions(req, res) {
 
   const start = Date.now();
   let upstream;
+  let escalationReason = null;
+  // X-Cogos-Escalate: 1 — caller explicitly wants frontier escalation.
+  // This is the manual_override path; logged + audit-row-attributed
+  // exactly the same as substrate-automatic escalation.
+  const manualEscalateHeader = (req.headers['x-cogos-escalate'] || '').toString().toLowerCase();
+  const manualEscalate = manualEscalateHeader === '1' || manualEscalateHeader === 'true';
+
   try {
     upstream = await callUpstream({
       url: UPSTREAM_URL(),
@@ -450,13 +534,150 @@ async function handleChatCompletions(req, res) {
       max_tokens: body.max_tokens,
       seed: body.seed,
     });
+    if (manualEscalate) escalationReason = 'manual_override';
   } catch (e) {
-    const latency = Date.now() - start;
+    escalationReason = 'sovereign_error';
     logger.error('upstream_request_failed', {
       provider: UPSTREAM_PROVIDER(),
       error: e.message,
-      latency,
+      latency: Date.now() - start,
     });
+    upstream = null;
+  }
+  if (upstream && !upstream.parsed) {
+    escalationReason = 'sovereign_error';
+    logger.warn('upstream_non_2xx', {
+      provider: UPSTREAM_PROVIDER(),
+      status: upstream.status,
+      body: upstream.data,
+    });
+  }
+
+  // ─── Substrate-automatic frontier escalation (CL-NEVER-1 rev 2026-06-06) ───
+  // If the sovereign call failed OR the caller forced manual_override AND
+  // escalation is configured + enabled, try the frontier. On success,
+  // record was_escalated=TRUE + frontier_provider + escalation_reason
+  // and return the frontier response inline as if it were the sovereign
+  // response (caller sees normal chat-completions shape; the escalation
+  // is provable from the audit row, not from the body).
+  if (escalationReason && escalationAllowed(escalationReason)) {
+    const frontierStart = Date.now();
+    const frontier = await callFrontier({
+      messages, schema,
+      temperature: typeof body.temperature === 'number' ? body.temperature : 0,
+      max_tokens: body.max_tokens,
+      seed: body.seed,
+    });
+    const totalLatency = Date.now() - start;
+    if (frontier.ok) {
+      const { content, prompt_tokens, completion_tokens, finish_reason } = frontier.parsed;
+      res.set('X-Cogos-Model', FRONTIER_MODEL_NAME());
+      res.set('X-Cogos-Latency-Ms', String(totalLatency));
+      res.set('X-Cogos-Schema-Enforced', schema ? '1' : '0');
+      res.set('X-Cogos-Request-Id', requestId);
+      res.set('X-Cogos-Was-Escalated', '1');
+      res.set('X-Cogos-Frontier-Provider', FRONTIER_PROVIDER_NAME());
+      res.set('X-Cogos-Escalation-Reason', escalationReason);
+
+      usage.record({
+        key_id: req.apiKey && req.apiKey.id,
+        tenant_id: req.apiKey && req.apiKey.tenant_id,
+        app_id: req.apiKey && req.apiKey.app_id,
+        model: FRONTIER_MODEL_NAME(),
+        prompt_tokens,
+        completion_tokens,
+        latency_ms: totalLatency,
+        status: 'success',
+        schema_enforced: Boolean(schema),
+        request_id: requestId,
+        prompt_fingerprint: promptFingerprint(messages),
+        schema_name: schemaName(body.response_format),
+        x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+        was_escalated: true,
+        frontier_provider: FRONTIER_PROVIDER_NAME(),
+        escalation_reason: escalationReason,
+      });
+      const frontierLatencyMs = Date.now() - frontierStart;
+      logger.info('frontier_escalation_success', {
+        provider: FRONTIER_PROVIDER_NAME(),
+        model: FRONTIER_MODEL_NAME(),
+        reason: escalationReason,
+        latency_ms: totalLatency,
+        frontier_latency_ms: frontierLatencyMs,
+      });
+      // Phase 1 learning log · capture the (prompt → frontier response)
+      // pair as training-data substrate. Best-effort: failures here must
+      // NEVER break the response we're about to ship.
+      try {
+        require('./escalation-learning').record({
+          request_id: requestId,
+          tenant_id: req.apiKey && req.apiKey.tenant_id,
+          app_id: req.apiKey && req.apiKey.app_id,
+          key_id: req.apiKey && req.apiKey.id,
+          escalation_reason: escalationReason,
+          sovereign_model: model,
+          frontier_provider: FRONTIER_PROVIDER_NAME(),
+          frontier_model: FRONTIER_MODEL_NAME(),
+          messages,
+          response_content: content,
+          prompt_tokens,
+          completion_tokens,
+          latency_ms: totalLatency,
+          frontier_latency_ms: frontierLatencyMs,
+        });
+      } catch (_e) { /* swallowed — learning log must not break user path */ }
+      return res.json({
+        id: requestId,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: FRONTIER_MODEL_NAME(),
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason }],
+        usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
+        cogos: {
+          schema_enforced: Boolean(schema),
+          latency_ms: totalLatency,
+          request_id: requestId,
+          was_escalated: true,
+          frontier_provider: FRONTIER_PROVIDER_NAME(),
+          escalation_reason: escalationReason,
+        },
+      });
+    }
+    // Frontier also failed — record both substrate failure modes on the
+    // audit row, then 502. The customer sees the original sovereign
+    // error; the audit row attributes the escalation attempt + failure.
+    logger.warn('frontier_escalation_failed', {
+      provider: FRONTIER_PROVIDER_NAME(),
+      reason: escalationReason,
+      frontier_reason: frontier.reason,
+    });
+    usage.record({
+      key_id: req.apiKey && req.apiKey.id,
+      tenant_id: req.apiKey && req.apiKey.tenant_id,
+      app_id: req.apiKey && req.apiKey.app_id,
+      model,
+      latency_ms: totalLatency,
+      status: 'escalation_failed',
+      schema_enforced: Boolean(schema),
+      request_id: requestId,
+      prompt_fingerprint: promptFingerprint(messages),
+      schema_name: schemaName(body.response_format),
+      x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+      was_escalated: true,
+      frontier_provider: FRONTIER_PROVIDER_NAME(),
+      escalation_reason: escalationReason,
+    });
+    return res.status(502).json({
+      error: {
+        message: `Sovereign tier failed (${escalationReason}); frontier escalation also failed (${frontier.reason}).`,
+        type: 'upstream_error',
+      },
+    });
+  }
+
+  // ─── Sovereign failure path with no escalation possible/desired ───
+  if (!upstream) {
+    const latency = Date.now() - start;
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,
@@ -484,11 +705,6 @@ async function handleChatCompletions(req, res) {
   const latencyMs = Date.now() - start;
 
   if (!upstream.parsed) {
-    logger.warn('upstream_non_2xx', {
-      provider: UPSTREAM_PROVIDER(),
-      status: upstream.status,
-      body: upstream.data,
-    });
     usage.record({
       key_id: req.apiKey && req.apiKey.id,
       tenant_id: req.apiKey && req.apiKey.tenant_id,

@@ -501,6 +501,81 @@ function escalationAllowed(reason) {
   return true;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Daily budget cap (failsafe against runaway escalation cost)
+// ─────────────────────────────────────────────────────────────────────
+//
+// FRONTIER_DAILY_BUDGET_USD_CAP enforces a hard upper bound on the
+// substrate's daily frontier spend. Computed live from the audit log:
+// sum of (prompt_tokens × input_rate + completion_tokens × output_rate)
+// over rows where was_escalated=TRUE and ts >= UTC midnight.
+//
+// When the projected cost for THIS call would push the running total
+// past the cap, the escalation is refused. The customer sees the
+// original sovereign error (substrate-honest: "we didn't silently
+// route you to a third party AND we didn't silently pay for it").
+//
+// Set FRONTIER_DAILY_BUDGET_USD_CAP=0 to disable the cap entirely.
+// Default 50.00 USD/day — generous enough to absorb a spike from a
+// transient sovereign outage without runaway risk.
+
+const BUDGET_CACHE_TTL_MS = 30_000;
+let _budgetCache = { ts: 0, spentToday: 0, capUsd: null };
+
+function todayMidnightMs() {
+  const d = new Date();
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate());
+}
+
+function frontierBudgetCapUsd() {
+  const raw = process.env.FRONTIER_DAILY_BUDGET_USD_CAP;
+  if (raw == null || raw === '') return 50.0;
+  const n = Number(raw);
+  if (!isFinite(n) || n < 0) return 50.0;
+  return n;
+}
+
+// Recompute today's spend from the usage log. Cached for 30s so this
+// only scans the JSONL once every few escalations under load.
+function currentDailySpendUsd() {
+  const now = Date.now();
+  const capUsd = frontierBudgetCapUsd();
+  if (_budgetCache.ts > 0 && (now - _budgetCache.ts) < BUDGET_CACHE_TTL_MS) {
+    return { spentToday: _budgetCache.spentToday, capUsd };
+  }
+  const usage = require('./usage');
+  const midnightMs = todayMidnightMs();
+  const costInPer1M  = Number(process.env.FRONTIER_COST_INPUT_USD_PER_1M  || 0.075);
+  const costOutPer1M = Number(process.env.FRONTIER_COST_OUTPUT_USD_PER_1M || 0.30);
+  let spent = 0;
+  for (const r of usage.readAll()) {
+    if (!r.was_escalated) continue;
+    const ts = new Date(r.ts).getTime();
+    if (ts < midnightMs) continue;
+    spent += (Number(r.prompt_tokens || 0)     / 1_000_000) * costInPer1M;
+    spent += (Number(r.completion_tokens || 0) / 1_000_000) * costOutPer1M;
+  }
+  _budgetCache = { ts: now, spentToday: spent, capUsd };
+  return { spentToday: spent, capUsd };
+}
+
+// Returns { allowed: bool, reason?: string } given the cap state.
+// allowed=false when capUsd > 0 and spentToday >= capUsd. We don't
+// project this call's cost (we don't yet know token counts) — a small
+// overshoot is acceptable; what we're guarding against is runaway.
+function checkFrontierBudget() {
+  const { spentToday, capUsd } = currentDailySpendUsd();
+  if (capUsd <= 0) return { allowed: true, spentToday, capUsd };
+  if (spentToday >= capUsd) {
+    return { allowed: false, spentToday, capUsd, reason: 'daily_cap_reached' };
+  }
+  return { allowed: true, spentToday, capUsd };
+}
+
+// Test-only invalidator. Production paths just wait out the 30s TTL.
+function _invalidateBudgetCache() { _budgetCache = { ts: 0, spentToday: 0, capUsd: null }; }
+module.exports._invalidateBudgetCache = _invalidateBudgetCache;
+
 async function handleChatCompletions(req, res) {
   const body = req.body || {};
   const messages = body.messages;
@@ -560,6 +635,44 @@ async function handleChatCompletions(req, res) {
   // and return the frontier response inline as if it were the sovereign
   // response (caller sees normal chat-completions shape; the escalation
   // is provable from the audit row, not from the body).
+  //
+  // Budget cap (failsafe): before each escalation, project today's spend.
+  // If we'd exceed FRONTIER_DAILY_BUDGET_USD_CAP, refuse the escalation
+  // and surface the original sovereign error. Honest: we didn't silently
+  // route AND we didn't silently pay.
+  if (escalationReason && escalationAllowed(escalationReason)) {
+    const budget = checkFrontierBudget();
+    if (!budget.allowed) {
+      logger.warn('frontier_budget_cap_reached', {
+        spent_today_usd: budget.spentToday,
+        cap_usd: budget.capUsd,
+        reason: escalationReason,
+      });
+      const latency = Date.now() - start;
+      usage.record({
+        key_id: req.apiKey && req.apiKey.id,
+        tenant_id: req.apiKey && req.apiKey.tenant_id,
+        app_id: req.apiKey && req.apiKey.app_id,
+        model,
+        latency_ms: latency,
+        status: 'budget_cap_reached',
+        schema_enforced: Boolean(schema),
+        request_id: requestId,
+        prompt_fingerprint: promptFingerprint(messages),
+        schema_name: schemaName(body.response_format),
+        x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+      });
+      res.set('X-Cogos-Budget-Cap-Reached', '1');
+      res.set('X-Cogos-Daily-Spend-Usd', budget.spentToday.toFixed(6));
+      res.set('X-Cogos-Daily-Cap-Usd', String(budget.capUsd));
+      return res.status(503).json({
+        error: {
+          message: `Sovereign tier failed (${escalationReason}); frontier escalation skipped because today's spend ($${budget.spentToday.toFixed(4)}) has reached the daily cap ($${budget.capUsd.toFixed(2)}).`,
+          type: 'budget_cap_reached',
+        },
+      });
+    }
+  }
   if (escalationReason && escalationAllowed(escalationReason)) {
     const frontierStart = Date.now();
     const frontier = await callFrontier({

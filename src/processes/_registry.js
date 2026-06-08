@@ -148,17 +148,25 @@ const REGISTRY = {
     pricing_label: 'Tier 1 · pure rule engine',
     rule_ids: primitive8.RULE_KEYS,
     engine: (body) => {
-      // Caller supplies `now` for deterministic windowing. If absent,
-      // server clock is used — but that breaks bitwise stability across
-      // calls, so we surface it on the response so the caller can pin
-      // it next time for reproducible audit.
-      const now = body && body.now ? body.now : new Date().toISOString();
-      const result = primitive8.evaluate({
-        inputs: body || {},
-        now,
-        enabled_rules: body && Array.isArray(body.enabled_rules) ? body.enabled_rules : undefined,
+      // Per COGOS_PROCESS_DETERMINISM_DOCTRINE_v0.1 PD-I2 + PD-HN-1:
+      // time anchors come from input, never the server clock. Refuse
+      // structurally when body.now is absent. The prior fallback
+      // (new Date().toISOString() + server_supplied_now informational
+      // field) was the affordance that broke compose_hash determinism
+      // for every plan that omitted `now`.
+      if (!body || !body.now) {
+        const err = new Error(
+          'primitive-8 requires body.now (ISO-8601 string); the substrate ' +
+          'refuses to synthesize from server clock per PROCESS_DETERMINISM PD-I2.'
+        );
+        err.code = 'missing_now';
+        throw err;
+      }
+      return primitive8.evaluate({
+        inputs: body,
+        now: body.now,
+        enabled_rules: Array.isArray(body.enabled_rules) ? body.enabled_rules : undefined,
       });
-      return { ...result, server_supplied_now: body && body.now ? null : now };
     },
   },
 };

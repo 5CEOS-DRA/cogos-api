@@ -1,0 +1,15 @@
+{
+  "_doctrine_note": "Substrate-test fixture per COGOS_PROCESS_DETERMINISM §10.8. NOT a real ARC corpus task. The rule encoded here is 'output keeps only the cells of the largest 4-connected object; every other cell goes to background.' An arc-graph-solver with strategy='keep_largest_object' achieves 100% accuracy on every test pair. Background = 0.",
+  "train": [
+    { "input":  [[0, 1, 1], [1, 1, 2], [0, 0, 0]],
+      "output": [[0, 1, 1], [1, 1, 0], [0, 0, 0]] },
+    { "input":  [[3, 3, 0], [3, 3, 5], [0, 0, 5]],
+      "output": [[3, 3, 0], [3, 3, 0], [0, 0, 0]] },
+    { "input":  [[7, 0, 0], [7, 7, 0], [0, 0, 8]],
+      "output": [[7, 0, 0], [7, 7, 0], [0, 0, 0]] }
+  ],
+  "test": [
+    { "input":  [[0, 6, 6, 6], [6, 6, 0, 9], [6, 0, 0, 0]],
+      "output": [[0, 6, 6, 6], [6, 6, 0, 0], [6, 0, 0, 0]] }
+  ]
+}

@@ -5,6 +5,12 @@ data/*
 # Allow the example pentest-history schema reference — it documents the
 # /trust dashboard's input shape without containing any real engagement data.
 !data/pentest-history.example.json
+# Allow the substrate-shipped ARC test fixtures — they are doctrine-
+# bound test corpus per COGOS_PROCESS_DETERMINISM §10.2 / §10.7
+# (NOT real ARC corpus tasks · operator corpora live elsewhere
+# via COGOS_ARC_CORPUS_ROOTS per PD-W12).
+!data/arc-tasks/
+!data/arc-tasks/demo-*.json
 *.log
 coverage/
 .DS_Store

@@ -1,0 +1,15 @@
+{
+  "_doctrine_note": "Substrate-test fixture per COGOS_PROCESS_DETERMINISM §10.9. NOT a real ARC corpus task. The rule encoded here is 'output = R×C grid filled with the majority non-background color over object cells.' An arc-hybrid-solver with strategy='majority_color_fill' achieves 100% accuracy on every test pair. Background = 0 (ARC convention, PD-I10).",
+  "train": [
+    { "input":  [[0, 1, 0], [1, 0, 2], [0, 0, 0]],
+      "output": [[1, 1, 1], [1, 1, 1], [1, 1, 1]] },
+    { "input":  [[3, 0, 3], [0, 3, 0], [3, 0, 5]],
+      "output": [[3, 3, 3], [3, 3, 3], [3, 3, 3]] },
+    { "input":  [[7, 7, 0], [0, 7, 4], [4, 0, 0]],
+      "output": [[7, 7, 7], [7, 7, 7], [7, 7, 7]] }
+  ],
+  "test": [
+    { "input":  [[0, 2, 0, 2], [2, 0, 8, 0], [0, 2, 0, 0]],
+      "output": [[2, 2, 2, 2], [2, 2, 2, 2], [2, 2, 2, 2]] }
+  ]
+}

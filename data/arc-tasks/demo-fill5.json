@@ -1,0 +1,13 @@
+{
+  "_doctrine_note": "Substrate-test fixture per COGOS_PROCESS_DETERMINISM §10.2. NOT a real ARC corpus task. The rule encoded here is 'output = grid of the same shape filled with color 5'; an arc-basic-solver with strategy='constant_fill', color=5 achieves 100% on the test pair.",
+  "train": [
+    { "input":  [[1, 0], [0, 1]],
+      "output": [[5, 5], [5, 5]] },
+    { "input":  [[2, 3], [4, 5]],
+      "output": [[5, 5], [5, 5]] }
+  ],
+  "test": [
+    { "input":  [[7, 8, 9], [0, 1, 2]],
+      "output": [[5, 5, 5], [5, 5, 5]] }
+  ]
+}

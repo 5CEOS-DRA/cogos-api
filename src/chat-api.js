@@ -1072,10 +1072,12 @@ async function handleChatCompletions(req, res) {
         web_provider: wa.web_provider, search_ms: wa.search_ms,
         latency_ms: totalLatency,
       });
-      // Capture web hit as training-data substrate. Best-effort — must
-      // never break the response. The (prompt → web results → sovereign
-      // answer) tuple is what we'll later use to train sovereign on
-      // queries it currently has to look up.
+      // PRIVACY-MINIMAL CAPTURE (2026-06-10 operator directive):
+      // Record metadata only — that the escalation happened, which path
+      // it took, how many sources, how long it took. NO prompt content,
+      // NO web result content, NO answer content. Customer queries don't
+      // sit in our retention. Best-effort: failures here must never
+      // break the response.
       try {
         require('./escalation-learning').record({
           request_id: requestId,
@@ -1086,9 +1088,7 @@ async function handleChatCompletions(req, res) {
           sovereign_model: wa.augmented_model,
           path: 'web_augmented',
           web_provider: wa.web_provider,
-          web_sources: wa.web_sources,
-          messages,
-          response_content: content,
+          web_sources_count: (wa.web_sources || []).length,
           prompt_tokens, completion_tokens,
           latency_ms: totalLatency,
           search_latency_ms: wa.search_ms,
@@ -1170,9 +1170,11 @@ async function handleChatCompletions(req, res) {
         latency_ms: totalLatency,
         frontier_latency_ms: frontierLatencyMs,
       });
-      // Phase 1 learning log · capture the (prompt → frontier response)
-      // pair as training-data substrate. Best-effort: failures here must
-      // NEVER break the response we're about to ship.
+      // Legacy frontier path · metadata-only capture (2026-06-10 directive).
+      // No prompt content, no frontier response content stored. The log
+      // still proves escalation happened + names the provider — that's
+      // enough for compliance + operator metrics without retaining a
+      // copy of the customer's data or the third-party model's output.
       try {
         require('./escalation-learning').record({
           request_id: requestId,
@@ -1181,10 +1183,9 @@ async function handleChatCompletions(req, res) {
           key_id: req.apiKey && req.apiKey.id,
           escalation_reason: escalationReason,
           sovereign_model: model,
+          path: 'frontier_llm',
           frontier_provider: FRONTIER_PROVIDER_NAME(),
           frontier_model: FRONTIER_MODEL_NAME(),
-          messages,
-          response_content: content,
           prompt_tokens,
           completion_tokens,
           latency_ms: totalLatency,

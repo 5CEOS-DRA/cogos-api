@@ -75,6 +75,30 @@ function ensureFile() {
 function record(row) {
   try {
     ensureFile();
+    // PRIVACY-MINIMAL CAPTURE (2026-06-10 operator directive):
+    //
+    // We DO NOT store the substance of what the web returned, the prompt
+    // the customer sent, or the answer we shipped. That's a deliberate
+    // sovereignty / privacy stance — customer queries don't sit in our
+    // training pile, and we don't retain copyrightable search-result
+    // content we have no license to keep.
+    //
+    // What we DO record is the minimal metadata needed to:
+    //   - prove the escalation happened (chain integrity)
+    //   - surface aggregate operator metrics (escalation rate, search
+    //     provider mix, latency)
+    //   - let the customer query the path their call took without
+    //     handing them or us a copy of the data
+    //
+    // Notably ABSENT from this row by design:
+    //   - messages[]          (no prompt content)
+    //   - response_content    (no answer content)
+    //   - web_sources[]       (no URLs / titles / snippets retained)
+    //   - search query        (the query is the prompt — same reason)
+    //
+    // If a future product wants to capture prompts for training, that's
+    // an opt-in customer-consent feature, NOT a default-on behavior of
+    // this log.
     const entry = {
       ts: row.ts || new Date().toISOString(),
       request_id: row.request_id || null,
@@ -83,27 +107,26 @@ function record(row) {
       key_id: row.key_id || null,
       escalation_reason: row.escalation_reason || null,
       sovereign_model: row.sovereign_model || null,
-      // path: 'frontier_llm' (legacy) | 'web_augmented' (new default)
-      // | 'verified' (sovereign + post-inference web fact-check).
-      // Each tuple shape is captured so future training-data extraction
-      // can filter by source quality. Web hits are the most valuable
-      // training substrate: (prompt → web sources → sovereign answer)
-      // pairs teach sovereign to answer queries it currently has to
-      // look up.
+      // path: 'frontier_llm' (legacy) | 'web_augmented' (default) | 'verified'
       path: row.path || 'frontier_llm',
-      // Legacy frontier-LLM fields (still captured when path=frontier_llm)
+      // Legacy frontier-LLM fields — metadata only (provider name + model).
       frontier_provider: row.frontier_provider || null,
       frontier_model: row.frontier_model || null,
-      // Web-augmented fields (captured when path=web_augmented)
+      // Web-augmented fields — provider name + sources_count + latency.
+      // NO web_sources[] content stored; only the count.
       web_provider: row.web_provider || null,
-      web_sources: Array.isArray(row.web_sources) ? row.web_sources : null,
+      web_sources_count:
+        typeof row.web_sources_count === 'number'
+          ? row.web_sources_count
+          : Array.isArray(row.web_sources) ? row.web_sources.length : 0,
       search_latency_ms: Number(row.search_latency_ms || 0),
-      // Verifier fields (captured when path=verified)
+      // Verifier metadata — outcome summary only (counts per state).
       verification_summary: row.verification_summary || null,
-      claims_checked: Array.isArray(row.claims_checked) ? row.claims_checked : null,
-      // Common
-      messages: Array.isArray(row.messages) ? row.messages : null,
-      response_content: row.response_content || null,
+      claims_checked_count:
+        typeof row.claims_checked_count === 'number'
+          ? row.claims_checked_count
+          : Array.isArray(row.claims_checked) ? row.claims_checked.length : 0,
+      // Token / timing counters (numbers, not content).
       prompt_tokens: Number(row.prompt_tokens || 0),
       completion_tokens: Number(row.completion_tokens || 0),
       latency_ms: Number(row.latency_ms || 0),

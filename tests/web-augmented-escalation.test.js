@@ -158,30 +158,52 @@ describe('Web-augmented sovereign escalation (2026-06-10)', () => {
     expect(frontierGuard.isDone()).toBe(false);
   });
 
-  test('learning log captures (prompt → web → sovereign answer) tuple', async () => {
+  test('learning log captures metadata ONLY — no prompt, no web sources, no answer content', async () => {
+    // Privacy-minimal capture (2026-06-10 directive): the log proves the
+    // escalation happened + names the provider + counts the sources, but
+    // does NOT retain the prompt, the web result content (URLs, titles,
+    // snippets), or the sovereign's answer. Customer queries don't sit
+    // in our training pile.
     nock('http://ollama.test').post('/api/chat').reply(503, 'down');
     nock('http://ollama.test').post('/api/chat').reply(503, 'down');
     nock('https://api.search.brave.com')
       .get('/res/v1/web/search').query(true)
-      .reply(200, { web: { results: [{ title: 'R1', url: 'https://ex.com/1', description: 'snip' }] } });
+      .reply(200, { web: { results: [
+        { title: 'Sensitive R1', url: 'https://ex.com/1', description: 'should NOT be in log' },
+        { title: 'Sensitive R2', url: 'https://ex.com/2', description: 'should NOT be in log' },
+      ] } });
     nock('http://ollama.test')
       .post('/api/chat')
-      .reply(200, { message: { content: 'answer with web [1]' }, prompt_eval_count: 10, eval_count: 3 });
+      .reply(200, { message: { content: 'sensitive answer that should NOT be retained' }, prompt_eval_count: 10, eval_count: 3 });
 
     const app = createApp();
     const apiKey = await issueKey(app, 'wa-tenant-d');
+    const sensitivePrompt = 'sensitive query that should NOT be retained';
     const r = await request(app)
       .post('/v1/chat/completions')
       .set('Authorization', `Bearer ${apiKey}`)
-      .send({ messages: [{ role: 'user', content: 'tell me about X' }] });
+      .send({ messages: [{ role: 'user', content: sensitivePrompt }] });
 
     expect(r.status).toBe(200);
     const learning = require('../src/escalation-learning');
     const rows = learning.read({ limit: 50, tenant_id: 'wa-tenant-d' });
     const found = rows.find((row) => row.request_id === r.body.id);
     expect(found).toBeDefined();
+    // Metadata IS captured:
     expect(found.path).toBe('web_augmented');
-    expect(Array.isArray(found.web_sources)).toBe(true);
-    expect(found.web_sources.length).toBeGreaterThan(0);
+    expect(found.web_provider).toBeTruthy();
+    expect(found.web_sources_count).toBe(2);
+    expect(found.escalation_reason).toBeTruthy();
+    expect(typeof found.latency_ms).toBe('number');
+    // Content is NOT captured (privacy-minimal):
+    expect(found.web_sources).toBeUndefined();
+    expect(found.messages).toBeUndefined();
+    expect(found.response_content).toBeUndefined();
+    // And as a sentinel: serialize the whole row and check that no
+    // substring of the sensitive strings leaked into it.
+    const rowStr = JSON.stringify(found);
+    expect(rowStr).not.toContain('sensitive');
+    expect(rowStr).not.toContain('Sensitive R');
+    expect(rowStr).not.toContain('ex.com/1');
   });
 });

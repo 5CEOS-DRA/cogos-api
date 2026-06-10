@@ -350,6 +350,9 @@ function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, 
 
 module.exports = {
   makeChatGroundedRouter,
+  // Exported so /v1/chat/completions web-augmented escalation reuses the
+  // exact prompt shape (single source of truth for sovereign grounding).
+  buildAugmentedMessages,
   ROUTE,
   _internal: { shouldSearch, buildAugmentedMessages, SEARCH_TRIGGERS },
 };

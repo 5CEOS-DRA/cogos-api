@@ -477,8 +477,18 @@ async function callUpstream(args) {
 // payload shape. Per memory: gemini-2.5-flash works on free tier with
 // the personal-account API key (AQ. prefix).
 
+// Defaults to FALSE as of 2026-06-10 (web-augmented sovereign is the
+// canonical escalation path). Operators who explicitly want the legacy
+// frontier-LLM path can set FRONTIER_ESCALATION_ENABLED=true, but
+// production deploys should leave it false — the personal-Gemini-account
+// T&C exposure is gone with the default.
 const FRONTIER_ENABLED = () =>
-  (process.env.FRONTIER_ESCALATION_ENABLED || 'true').toLowerCase() !== 'false';
+  (process.env.FRONTIER_ESCALATION_ENABLED || 'false').toLowerCase() === 'true';
+// New policy: web-augmented sovereign retry is on by default. Disable
+// via WEB_AUGMENTED_ESCALATION_ENABLED=false (rare — fail-fast deploys
+// that want sovereign errors to surface as 502 instead of being web-saved).
+const WEB_AUGMENTED_ENABLED = () =>
+  (process.env.WEB_AUGMENTED_ESCALATION_ENABLED || 'true').toLowerCase() !== 'false';
 const FRONTIER_PROVIDER_NAME = () => process.env.FRONTIER_PROVIDER || 'gemini';
 const FRONTIER_API_BASE_URL = () => process.env.FRONTIER_API_BASE || '';
 const FRONTIER_API_KEY_VAL = () => process.env.FRONTIER_API_KEY || '';
@@ -490,6 +500,92 @@ const ALLOWED_ESCALATION_REASONS = new Set([
   'low_confidence', 'schema_invalid', 'manual_override',
 ]);
 
+// ─────────────────────────────────────────────────────────────────────
+// Web-augmented sovereign retry (CL-NEVER-1 successor, 2026-06-10)
+// ─────────────────────────────────────────────────────────────────────
+//
+// New escalation policy: when sovereign cannot resolve, the substrate
+// searches the live web (Brave) and re-prompts sovereign Qwen with the
+// search results as grounding. NO third-party LLM is ever called.
+//
+// Architectural intent:
+//   1. Closes the T&C exposure of routing customer inference through a
+//      personal-account Gemini key.
+//   2. Preserves the "every operation chain-visible" guarantee — the
+//      receipt carries search_request_id + search_provider + sources[]
+//      identical to /v1/chat-grounded.
+//   3. Every web hit is captured by escalation-learning as training-data
+//      substrate so the sovereign tier learns from what it had to look up.
+//      Over time, the rate at which we need to web-augment drops.
+//
+// Reuses the prompt shape from /v1/chat-grounded.buildAugmentedMessages
+// (single source of truth for sovereign-with-search prompts).
+async function callWebAugmentedSovereign({ messages, schema, temperature, max_tokens, seed, tools, tool_choice }) {
+  const searchClient = require('./search-client');
+  const { buildAugmentedMessages } = require('./routers/chat-grounded');
+
+  // Extract the most recent user query as the search query. Multi-turn
+  // chat: the latest user message is the question to ground.
+  const lastUser = [...messages].reverse().find((m) => m && m.role === 'user');
+  const query = lastUser ? String(lastUser.content || '').slice(0, 500) : '';
+  if (!query) {
+    return { ok: false, reason: 'web_augment_no_query' };
+  }
+
+  const sT0 = Date.now();
+  let searchResult;
+  try {
+    searchResult = await searchClient.search({ query, maxResults: 5 });
+  } catch (e) {
+    return { ok: false, reason: 'web_search_threw', error: e.message };
+  }
+  const searchMs = Date.now() - sT0;
+
+  // Build the augmented prompt — same shape /v1/chat-grounded uses.
+  // Composes search results into a system message that instructs the
+  // sovereign model to use ONLY those sources + cite by index.
+  const augmentedMessages = buildAugmentedMessages(query, searchResult);
+
+  // Re-invoke sovereign Ollama with the augmented prompt. Same provider,
+  // same model, same temperature/seed — only the prompt context changed.
+  const upstreamUrl = UPSTREAM_URL();
+  const upstreamKey = UPSTREAM_API_KEY();
+  const upstreamProvider = UPSTREAM_PROVIDER();
+  const model = resolveModel('cogos-tier-a');  // Tier A on the augmented retry — bigger model gets best chance with grounding
+
+  let upstream;
+  try {
+    upstream = upstreamProvider === 'openai'
+      ? await callOpenAI({ url: upstreamUrl, key: upstreamKey, model, messages: augmentedMessages, schema, temperature, max_tokens, seed, tools, tool_choice })
+      : await callOllama({ url: upstreamUrl, model, messages: augmentedMessages, schema, temperature, max_tokens, seed, tools, tool_choice });
+  } catch (e) {
+    return { ok: false, reason: 'sovereign_retry_threw', error: e.message, searchMs };
+  }
+
+  if (!upstream || !upstream.parsed) {
+    return {
+      ok: false,
+      reason: 'sovereign_retry_non_2xx',
+      status: upstream && upstream.status,
+      searchMs,
+      web_sources: (searchResult.results || []).slice(0, 5).map((r) => ({ title: r.title, url: r.url })),
+    };
+  }
+
+  return {
+    ok: true,
+    parsed: upstream.parsed,
+    data: upstream.data,
+    web_provider: searchResult.provider || 'unknown',
+    web_sources: (searchResult.results || []).slice(0, 5).map((r) => ({ title: r.title, url: r.url })),
+    search_ms: searchMs,
+    augmented_model: model,
+  };
+}
+
+// Legacy frontier-LLM escalation path. Kept for back-compat under
+// FRONTIER_ESCALATION_ENABLED=true but DEFAULTS TO DISABLED as of
+// 2026-06-10. Web-augmented sovereign is the canonical path now.
 async function callFrontier({ messages, schema, temperature, max_tokens, seed, tools, tool_choice }) {
   const baseUrl = FRONTIER_API_BASE_URL();
   const key = FRONTIER_API_KEY_VAL();
@@ -927,6 +1023,105 @@ async function handleChatCompletions(req, res) {
       });
     }
   }
+  // ─── NEW PRIMARY PATH: web-augmented sovereign retry (2026-06-10) ───
+  // Default escalation policy: when sovereign cannot resolve, search the
+  // live web and re-prompt sovereign with the results. NO third-party LLM
+  // is called. Every web hit is captured by escalation-learning as
+  // training-data substrate so the sovereign tier learns from what it had
+  // to look up — over time, the rate at which we need to web-augment drops.
+  if (escalationReason && WEB_AUGMENTED_ENABLED() && escalationReason !== 'manual_override') {
+    const waStart = Date.now();
+    const wa = await callWebAugmentedSovereign({
+      messages, schema,
+      temperature: typeof body.temperature === 'number' ? body.temperature : 0,
+      max_tokens: body.max_tokens,
+      seed: body.seed,
+      tools: body.tools,
+      tool_choice: body.tool_choice,
+    });
+    if (wa.ok) {
+      const { content, tool_calls, prompt_tokens, completion_tokens, finish_reason } = wa.parsed;
+      const totalLatency = Date.now() - start;
+      res.set('X-Cogos-Model', wa.augmented_model);
+      res.set('X-Cogos-Latency-Ms', String(totalLatency));
+      res.set('X-Cogos-Schema-Enforced', schema ? '1' : '0');
+      res.set('X-Cogos-Request-Id', requestId);
+      res.set('X-Cogos-Was-Web-Augmented', '1');
+      res.set('X-Cogos-Web-Provider', wa.web_provider);
+      res.set('X-Cogos-Escalation-Reason', escalationReason);
+      usage.record({
+        key_id: req.apiKey && req.apiKey.id,
+        tenant_id: req.apiKey && req.apiKey.tenant_id,
+        app_id: req.apiKey && req.apiKey.app_id,
+        model: wa.augmented_model,
+        prompt_tokens, completion_tokens,
+        latency_ms: totalLatency, status: 'success',
+        schema_enforced: Boolean(schema),
+        request_id: requestId,
+        prompt_fingerprint: promptFingerprint(messages),
+        schema_name: schemaName(body.response_format),
+        x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+        was_web_augmented: true,
+        web_provider: wa.web_provider,
+        web_sources_count: (wa.web_sources || []).length,
+        escalation_reason: escalationReason,
+        sovereign_attempts: sovereignAttempts,
+      });
+      logger.info('web_augmented_success', {
+        request_id: requestId, reason: escalationReason,
+        web_provider: wa.web_provider, search_ms: wa.search_ms,
+        latency_ms: totalLatency,
+      });
+      // Capture web hit as training-data substrate. Best-effort — must
+      // never break the response. The (prompt → web results → sovereign
+      // answer) tuple is what we'll later use to train sovereign on
+      // queries it currently has to look up.
+      try {
+        require('./escalation-learning').record({
+          request_id: requestId,
+          tenant_id: req.apiKey && req.apiKey.tenant_id,
+          app_id: req.apiKey && req.apiKey.app_id,
+          key_id: req.apiKey && req.apiKey.id,
+          escalation_reason: escalationReason,
+          sovereign_model: wa.augmented_model,
+          path: 'web_augmented',
+          web_provider: wa.web_provider,
+          web_sources: wa.web_sources,
+          messages,
+          response_content: content,
+          prompt_tokens, completion_tokens,
+          latency_ms: totalLatency,
+          search_latency_ms: wa.search_ms,
+        });
+      } catch (_e) { /* swallowed */ }
+      return res.json({
+        id: requestId,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: wa.augmented_model,
+        choices: [{ index: 0, message: tool_calls ? { role: 'assistant', content, tool_calls } : { role: 'assistant', content }, finish_reason }],
+        usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
+        cogos: {
+          schema_enforced: Boolean(schema),
+          latency_ms: totalLatency,
+          request_id: requestId,
+          was_web_augmented: true,
+          web_provider: wa.web_provider,
+          web_sources: wa.web_sources,
+          escalation_reason: escalationReason,
+        },
+      });
+    }
+    // wa.ok false → fall through to clean 503 (or legacy frontier if explicitly enabled)
+    logger.warn('web_augmented_failed', {
+      request_id: requestId, reason: wa.reason, error: wa.error,
+    });
+  }
+
+  // ─── LEGACY: third-party frontier LLM (default DISABLED 2026-06-10) ───
+  // Only runs when FRONTIER_ESCALATION_ENABLED=true. The personal-Gemini
+  // account T&C exposure is the reason this is off by default; back-compat
+  // path kept so operators can re-enable for diagnostics.
   if (escalationReason && escalationAllowed(escalationReason)) {
     const frontierStart = Date.now();
     const frontier = await callFrontier({

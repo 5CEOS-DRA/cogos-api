@@ -83,8 +83,25 @@ function record(row) {
       key_id: row.key_id || null,
       escalation_reason: row.escalation_reason || null,
       sovereign_model: row.sovereign_model || null,
+      // path: 'frontier_llm' (legacy) | 'web_augmented' (new default)
+      // | 'verified' (sovereign + post-inference web fact-check).
+      // Each tuple shape is captured so future training-data extraction
+      // can filter by source quality. Web hits are the most valuable
+      // training substrate: (prompt → web sources → sovereign answer)
+      // pairs teach sovereign to answer queries it currently has to
+      // look up.
+      path: row.path || 'frontier_llm',
+      // Legacy frontier-LLM fields (still captured when path=frontier_llm)
       frontier_provider: row.frontier_provider || null,
       frontier_model: row.frontier_model || null,
+      // Web-augmented fields (captured when path=web_augmented)
+      web_provider: row.web_provider || null,
+      web_sources: Array.isArray(row.web_sources) ? row.web_sources : null,
+      search_latency_ms: Number(row.search_latency_ms || 0),
+      // Verifier fields (captured when path=verified)
+      verification_summary: row.verification_summary || null,
+      claims_checked: Array.isArray(row.claims_checked) ? row.claims_checked : null,
+      // Common
       messages: Array.isArray(row.messages) ? row.messages : null,
       response_content: row.response_content || null,
       prompt_tokens: Number(row.prompt_tokens || 0),

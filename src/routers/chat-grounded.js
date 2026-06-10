@@ -204,6 +204,7 @@ function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, 
     const messages = buildAugmentedMessages(query, searchResult);
     const cT0 = Date.now();
     let upstreamResult;
+    let escalationReason = null;
     try {
       const upstreamUrl = process.env.UPSTREAM_URL || process.env.OLLAMA_URL || 'http://localhost:11434';
       // Resolve the customer-tier model id to the actual upstream model.
@@ -215,29 +216,60 @@ function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, 
         temperature,
         max_tokens,
       });
+      if (!upstreamResult.parsed) escalationReason = 'sovereign_error';
     } catch (e) {
-      const ms = Date.now() - t0;
-      try {
-        usage.record({
-          key_id: req.apiKey && req.apiKey.id,
-          tenant_id: req.apiKey && req.apiKey.tenant_id,
-          app_id: req.apiKey && req.apiKey.app_id,
-          model: `grounded:${model}:v1`,
-          prompt_tokens: 0, completion_tokens: 0,
-          latency_ms: ms, status: 'server_error',
-          request_id, route: ROUTE,
-        });
-      } catch (_e) { /* swallow */ }
-      return res.status(502).json({
-        error: { message: 'upstream LLM call failed: ' + e.message, type: 'bad_gateway', code: 'upstream_failure' },
-        receipt: { request_id, ms, deterministic_hash, evidence_chain: { ...evidence, chat_ms: Date.now() - cT0 } },
-      });
+      // Sovereign threw — eligible for frontier escalation. Don't bail
+      // yet; B4 wires the same fallback pattern /v1/chat/completions uses.
+      escalationReason = 'sovereign_error';
+      upstreamResult = null;
     }
-
     const cMs = Date.now() - cT0;
     evidence.chat_ms = cMs;
 
-    if (!upstreamResult.parsed) {
+    // ── 2b. B4 · Frontier escalation when sovereign failed ──
+    // Same policy as chat-api.js: if escalation is configured + enabled +
+    // budget allows, retry on the frontier (Gemini by default). On success
+    // surface the frontier answer with was_escalated in evidence_chain.
+    if (escalationReason && chatApi._frontier && chatApi._frontier.escalationAllowed(escalationReason)) {
+      const budget = chatApi._frontier.checkFrontierBudget();
+      if (budget.allowed) {
+        const fT0 = Date.now();
+        const frontier = await chatApi._frontier.callFrontier({
+          messages,
+          temperature,
+          max_tokens,
+        });
+        if (frontier.ok) {
+          // Replace upstreamResult with the frontier shape so the rest of
+          // the handler treats it as a normal success.
+          upstreamResult = { parsed: frontier.parsed };
+          evidence.was_escalated     = true;
+          evidence.frontier_provider = chatApi._frontier.FRONTIER_PROVIDER_NAME();
+          evidence.frontier_model    = chatApi._frontier.FRONTIER_MODEL_NAME();
+          evidence.escalation_reason = escalationReason;
+          evidence.frontier_ms       = Date.now() - fT0;
+          logger.info('[chat-grounded] frontier escalation success', {
+            request_id, reason: escalationReason, frontier_ms: evidence.frontier_ms,
+          });
+        } else {
+          logger.warn('[chat-grounded] frontier escalation failed', {
+            request_id, reason: escalationReason, frontier_reason: frontier.reason,
+          });
+          evidence.was_escalated     = true;
+          evidence.escalation_reason = escalationReason;
+          evidence.frontier_reason   = frontier.reason;
+        }
+      } else {
+        logger.warn('[chat-grounded] frontier budget cap reached, skipping escalation', {
+          request_id, spent_today_usd: budget.spentToday, cap_usd: budget.capUsd,
+        });
+        evidence.escalation_reason   = escalationReason;
+        evidence.frontier_reason     = 'budget_cap_reached';
+      }
+    }
+
+    // ── 2c. Sovereign failed AND escalation didn't recover → 502 ──
+    if (!upstreamResult || !upstreamResult.parsed) {
       const ms = Date.now() - t0;
       try {
         usage.record({
@@ -251,7 +283,7 @@ function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, 
         });
       } catch (_e) { /* swallow */ }
       return res.status(502).json({
-        error: { message: 'upstream LLM returned non-2xx', type: 'bad_gateway', code: 'upstream_failure' },
+        error: { message: 'upstream LLM call failed and frontier escalation did not recover', type: 'bad_gateway', code: 'upstream_failure' },
         receipt: { request_id, ms, deterministic_hash, evidence_chain: evidence },
       });
     }
@@ -268,16 +300,27 @@ function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, 
 
     const ms = Date.now() - t0;
     try {
-      usage.record({
+      // B4: when the answer came from the frontier, flag was_escalated +
+      // attribute the provider so the daily-budget tracker (which reads
+      // these fields off the usage log) accounts for the spend.
+      const usageRow = {
         key_id: req.apiKey && req.apiKey.id,
         tenant_id: req.apiKey && req.apiKey.tenant_id,
         app_id: req.apiKey && req.apiKey.app_id,
-        model: `grounded:${model}:v1`,
+        model: evidence.was_escalated
+          ? `grounded:${model}:v1+frontier`
+          : `grounded:${model}:v1`,
         prompt_tokens: upstreamResult.parsed.prompt_tokens || 0,
         completion_tokens: upstreamResult.parsed.completion_tokens || 0,
         latency_ms: ms, status: 'success',
         request_id, route: ROUTE,
-      });
+      };
+      if (evidence.was_escalated) {
+        usageRow.was_escalated     = true;
+        usageRow.frontier_provider = evidence.frontier_provider;
+        usageRow.escalation_reason = evidence.escalation_reason;
+      }
+      usage.record(usageRow);
     } catch (recordErr) {
       logger.warn('[chat-grounded] usage.record failed', { error: recordErr.message });
     }

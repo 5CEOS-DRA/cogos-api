@@ -989,4 +989,14 @@ module.exports = {
   TIER_TO_MODEL,
   // exported for tests
   _internal: { callOllama, callOpenAI, extractSchema, countCurrentCycleRequests },
+  // Frontier-escalation helpers exposed so other routers (chat-grounded,
+  // future surfaces) can apply the same sovereign-first → frontier-fallback
+  // policy and the same daily-budget cap without duplicating the logic.
+  _frontier: {
+    callFrontier,
+    escalationAllowed,
+    checkFrontierBudget,
+    FRONTIER_PROVIDER_NAME,
+    FRONTIER_MODEL_NAME,
+  },
 };

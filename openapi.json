@@ -14,7 +14,13 @@
     { "name": "completions", "description": "Schema-locked chat completions in the widely-adopted /v1/chat/completions format" },
     { "name": "models", "description": "Available models" },
     { "name": "audit", "description": "Hash-chained audit receipts per (tenant, app)" },
-    { "name": "signup", "description": "Free-tier key issuance" }
+    { "name": "signup", "description": "Free-tier key issuance" },
+    { "name": "identity", "description": "Caller identity + package introspection" },
+    { "name": "grounded", "description": "Search-augmented chat with unified receipt — answer + citations bound together" },
+    { "name": "processes", "description": "Deterministic processes (iolta-reconcile, 5law-conflict-check, etc.) — same input → same bytes out" },
+    { "name": "search", "description": "Receipt-bearing live-web search" },
+    { "name": "compose", "description": "Multi-step deterministic workflow composition" },
+    { "name": "state", "description": "Per-key stateful substrate (matters, parties); writes metered, reads free" }
   ],
   "components": {
     "securitySchemes": {
@@ -56,15 +62,61 @@
               "schema": { "type": "object", "description": "JSON Schema object when type=json_schema" }
             }
           },
-          "stream": { "type": "boolean", "default": false }
+          "stream": { "type": "boolean", "default": false },
+          "tools": {
+            "type": "array",
+            "description": "OpenAI-compatible tool/function definitions. Forwarded verbatim to the upstream model.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "type": { "type": "string", "enum": ["function"] },
+                "function": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "parameters": { "type": "object", "description": "JSON Schema object describing function parameters" }
+                  }
+                }
+              }
+            }
+          },
+          "tool_choice": {
+            "description": "Same semantics as OpenAI: 'none' | 'auto' | 'required' | { type:'function', function:{name} }",
+            "oneOf": [
+              { "type": "string", "enum": ["none", "auto", "required"] },
+              { "type": "object" }
+            ]
+          },
+          "seed": { "type": "integer", "description": "Forwarded to upstream for deterministic sampling when supported." }
         }
       },
       "ChatMessage": {
         "type": "object",
-        "required": ["role", "content"],
+        "required": ["role"],
         "properties": {
-          "role": { "type": "string", "enum": ["system", "user", "assistant"] },
-          "content": { "type": "string" }
+          "role": { "type": "string", "enum": ["system", "user", "assistant", "tool"] },
+          "content": { "type": "string" },
+          "tool_calls": {
+            "type": "array",
+            "description": "Present on assistant messages when the model decided to call a tool. Pass these back in a follow-up message with role:'tool' and matching tool_call_id to complete the loop.",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": { "type": "string" },
+                "type": { "type": "string", "enum": ["function"] },
+                "function": {
+                  "type": "object",
+                  "properties": {
+                    "name": { "type": "string" },
+                    "arguments": { "type": "string", "description": "JSON-encoded arguments string" }
+                  }
+                }
+              }
+            }
+          },
+          "tool_call_id": { "type": "string", "description": "Required on role:'tool' messages — the id from the assistant's tool_calls[]." },
+          "name": { "type": "string", "description": "Optional sender name (function name for role:'tool')" }
         }
       },
       "ChatCompletionResponse": {
@@ -255,6 +307,279 @@
               }
             }
           }
+        }
+      }
+    },
+    "/v1/me": {
+      "get": {
+        "tags": ["identity"],
+        "summary": "Identity probe — caller's tenant, key, package, quota",
+        "description": "Returns the requesting key's identity + the resolved package's monthly_request_quota, allowed_model_tiers, and current billing-cycle start. Used by CLI / SDK quota commands to render usage-vs-cap without a second call.",
+        "operationId": "getIdentity",
+        "responses": {
+          "200": {
+            "description": "Identity payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "ok": { "type": "boolean" },
+                    "tenant_id": { "type": "string" },
+                    "tenant_type": { "type": "string", "enum": ["subscriber", "operator"] },
+                    "key_id": { "type": "string" },
+                    "app_id": { "type": "string" },
+                    "tier": { "type": "string" },
+                    "scheme": { "type": "string", "enum": ["bearer", "ed25519"] },
+                    "active": { "type": "boolean" },
+                    "monthly_request_quota": { "type": "integer", "nullable": true },
+                    "allowed_model_tiers": { "type": "array", "items": { "type": "string" } },
+                    "package_id": { "type": "string", "nullable": true },
+                    "cycle_start_ms": { "type": "integer", "nullable": true }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid API key" }
+        }
+      }
+    },
+    "/v1/audit": {
+      "get": {
+        "tags": ["audit"],
+        "summary": "Query the hash-chained audit log slice for this tenant",
+        "description": "Returns the requesting tenant's chained usage rows since a unix-ms timestamp. Strictly tenant-scoped — customer A can never see customer B's rows. chain_ok reflects server-side verifyChain() on the returned slice; customers re-run verification locally for independent assurance.",
+        "operationId": "queryAudit",
+        "parameters": [
+          { "name": "since", "in": "query", "schema": { "type": "integer", "default": 0 }, "description": "Unix-ms; rows with ts >= since are returned." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "maximum": 1000 } },
+          { "name": "app_id", "in": "query", "schema": { "type": "string" }, "description": "Optional — scope the slice to a single app's chain." }
+        ],
+        "responses": {
+          "200": {
+            "description": "Audit slice + chain integrity flag",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "rows": { "type": "array", "items": { "type": "object" } },
+                    "chain_ok": { "type": "boolean" },
+                    "chain_break": { "type": "object", "nullable": true }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid `since` or `limit`" },
+          "401": { "description": "Missing or invalid API key" }
+        }
+      }
+    },
+    "/v1/chat-grounded": {
+      "post": {
+        "tags": ["grounded"],
+        "summary": "Search-augmented chat — answer + citations bound by one receipt",
+        "description": "Composes /v1/search + sovereign LLM on the server side so the customer makes ONE call and the output_hash binds answer + citations together as one indivisible artifact. Search trigger is heuristic in mode='auto' (keywords: today, current, latest, news, price of, who won, etc.); override with mode='always-search' or 'never-search'. ONE billable usage row per call regardless of internal sub-operations.",
+        "operationId": "chatGrounded",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                  "query": { "type": "string" },
+                  "mode": { "type": "string", "enum": ["auto", "always-search", "never-search"], "default": "auto" },
+                  "model": { "type": "string", "default": "cogos-tier-b" },
+                  "temperature": { "type": "number", "default": 0 },
+                  "max_tokens": { "type": "integer", "default": 500 },
+                  "max_results": { "type": "integer", "default": 5, "maximum": 10 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Answer + citations + receipt with evidence_chain",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "answer": { "type": "string" },
+                    "citations": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "url": { "type": "string" }, "snippet": { "type": "string" } } } },
+                    "search_used": { "type": "boolean" },
+                    "search_skip_reason": { "type": "string" },
+                    "model": { "type": "string" },
+                    "usage": { "type": "object", "properties": { "prompt_tokens": { "type": "integer" }, "completion_tokens": { "type": "integer" } } },
+                    "receipt": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": { "type": "string" },
+                        "ms": { "type": "integer" },
+                        "deterministic_hash": { "type": "string" },
+                        "output_hash": { "type": "string" },
+                        "evidence_chain": {
+                          "type": "object",
+                          "properties": {
+                            "search_request_id": { "type": "string" },
+                            "search_provider": { "type": "string" },
+                            "search_output_hash": { "type": "string" },
+                            "search_ms": { "type": "integer" },
+                            "chat_ms": { "type": "integer" }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "Missing or invalid query" },
+          "401": { "description": "Missing or invalid API key" },
+          "429": { "description": "Daily cap or monthly quota exceeded" },
+          "502": { "description": "Upstream LLM call failed" }
+        }
+      }
+    },
+    "/v1/process": {
+      "get": {
+        "tags": ["processes"],
+        "summary": "List available deterministic processes",
+        "description": "Catalog endpoint — machine-readable list of processes this gateway exposes. No auth required for discovery; invocations are auth-gated.",
+        "operationId": "listProcesses",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "Process catalog",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "processes": { "type": "array", "items": { "type": "object", "properties": { "id": { "type": "string" }, "model_id": { "type": "string" }, "description": { "type": "string" } } } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/process/{slug}": {
+      "post": {
+        "tags": ["processes"],
+        "summary": "Invoke a deterministic process — same input → same bytes out",
+        "description": "Each process is a pure function over its input; output_hash in the receipt proves bit-stable output for this (input, engine_version). v0.1 ships iolta-reconcile and 5law-conflict-check.",
+        "operationId": "invokeProcess",
+        "parameters": [
+          { "name": "slug", "in": "path", "required": true, "schema": { "type": "string" }, "description": "Process id from /v1/process catalog (e.g. `iolta-reconcile`)" }
+        ],
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "description": "Process-specific input shape — see catalog for each process's schema." } } } },
+        "responses": {
+          "200": {
+            "description": "Process output + receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "receipt": {
+                      "type": "object",
+                      "properties": {
+                        "request_id": { "type": "string" },
+                        "ms": { "type": "integer" },
+                        "deterministic_hash": { "type": "string" },
+                        "output_hash": { "type": "string" }
+                      }
+                    }
+                  },
+                  "additionalProperties": true
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid input shape" },
+          "401": { "description": "Missing or invalid API key" },
+          "429": { "description": "Daily cap or monthly quota exceeded" },
+          "500": { "description": "Engine failure" }
+        }
+      }
+    },
+    "/v1/search": {
+      "post": {
+        "tags": ["search"],
+        "summary": "Receipt-bearing live-web search",
+        "description": "Live web search via Brave (or provider:'none' when BRAVE_SEARCH_API_KEY is unset — receipt still emitted). Same receipt-chain semantics as /v1/process; the output_hash proves what was returned at this moment (not determinism — search is non-deterministic by nature).",
+        "operationId": "search",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                  "query": { "type": "string" },
+                  "max_results": { "type": "integer", "default": 5, "maximum": 10 }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Search results + receipt",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "query": { "type": "string" },
+                    "provider": { "type": "string", "description": "'brave-v1' or 'none' when no API key configured" },
+                    "results": { "type": "array", "items": { "type": "object", "properties": { "title": { "type": "string" }, "url": { "type": "string" }, "snippet": { "type": "string" } } } },
+                    "receipt": { "type": "object" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "Missing or invalid API key" },
+          "429": { "description": "Daily cap or monthly quota exceeded" }
+        }
+      }
+    },
+    "/v1/compose": {
+      "post": {
+        "tags": ["compose"],
+        "summary": "Multi-step deterministic workflow composition",
+        "description": "Linear-sequence composition of registered processes with end-to-end chain hashing. One billable usage row per composition (not per step).",
+        "operationId": "compose",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object", "properties": { "steps": { "type": "array", "items": { "type": "object" } } } } } } },
+        "responses": {
+          "200": { "description": "Composed output + receipt" },
+          "400": { "description": "Invalid step shape" },
+          "401": { "description": "Missing or invalid API key" },
+          "429": { "description": "Daily cap or monthly quota exceeded" }
+        }
+      }
+    },
+    "/v1/state/matters": {
+      "post": {
+        "tags": ["state"],
+        "summary": "Upsert one or many matter records (per-key stateful substrate)",
+        "description": "Writes one chain-row per call. Reads on /v1/state/* GET endpoints are free (not metered).",
+        "operationId": "stateMatterUpsert",
+        "requestBody": { "required": true, "content": { "application/json": { "schema": { "type": "object" } } } },
+        "responses": {
+          "200": { "description": "Write succeeded + receipt" },
+          "401": { "description": "Missing or invalid API key" },
+          "429": { "description": "Daily cap or monthly quota exceeded" }
         }
       }
     }

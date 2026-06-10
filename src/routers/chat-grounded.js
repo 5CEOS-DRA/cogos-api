@@ -144,10 +144,18 @@ function buildAugmentedMessages(query, searchResult) {
   ];
 }
 
-function makeChatGroundedRouter({ customerAuth, tenantLimiter }) {
+function makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }) {
   const router = express.Router();
 
-  router.post('/', customerAuth, tenantLimiter, async (req, res) => {
+  // Quota gate: grounded calls hit the same daily-cap + monthly-package
+  // budget as /v1/chat/completions. Without these middlewares a free-tier
+  // key that exhausted its /v1/chat allowance could route around it here.
+  // Optional-param pattern keeps tests that build a router without
+  // middleware (pure-shape unit tests) working — they just skip the gate.
+  const dailyCap = enforceDailyCap || ((req, _res, next) => next());
+  const pkgGate  = enforcePackage  || ((req, _res, next) => next());
+
+  router.post('/', customerAuth, tenantLimiter, dailyCap, pkgGate, async (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const rawBody = req.body || {};

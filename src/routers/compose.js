@@ -62,10 +62,15 @@ function newRequestId() {
   return 'comp_' + crypto.randomBytes(16).toString('base64url');
 }
 
-function makeComposeRouter({ customerAuth, tenantLimiter }) {
+function makeComposeRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }) {
   const router = express.Router();
+  // Quota gate: composition is billable substrate work and must count
+  // against the same package quota as /v1/chat. Optional params let
+  // tests build the router without middleware.
+  const dailyCap = enforceDailyCap || ((req, _res, next) => next());
+  const pkgGate  = enforcePackage  || ((req, _res, next) => next());
 
-  router.post('/', customerAuth, tenantLimiter, async (req, res) => {
+  router.post('/', customerAuth, tenantLimiter, dailyCap, pkgGate, async (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const body = req.body || {};

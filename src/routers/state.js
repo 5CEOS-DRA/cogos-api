@@ -64,11 +64,16 @@ function tenantKey(req) {
   };
 }
 
-function makeStateRouter({ customerAuth, tenantLimiter }) {
+function makeStateRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }) {
   const router = express.Router();
+  // Quota gate: state writes are billable; reads stay free per the
+  // "reads are free" convention in index.js:1011. Optional params let
+  // tests build the router without middleware.
+  const dailyCap = enforceDailyCap || ((req, _res, next) => next());
+  const pkgGate  = enforcePackage  || ((req, _res, next) => next());
 
   // ─── Write: matter.upsert (single or batch) ────────────────────
-  router.post('/matters', customerAuth, tenantLimiter, (req, res) => {
+  router.post('/matters', customerAuth, tenantLimiter, dailyCap, pkgGate, (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const route = STATE_ROUTE_PREFIX + '/matters';
@@ -118,7 +123,7 @@ function makeStateRouter({ customerAuth, tenantLimiter }) {
   });
 
   // ─── Write: matter.archive ─────────────────────────────────────
-  router.post('/matters/:id/archive', customerAuth, tenantLimiter, (req, res) => {
+  router.post('/matters/:id/archive', customerAuth, tenantLimiter, dailyCap, pkgGate, (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const route = STATE_ROUTE_PREFIX + '/matters/:id/archive';
@@ -158,7 +163,7 @@ function makeStateRouter({ customerAuth, tenantLimiter }) {
   });
 
   // ─── Write: parties.upsert ─────────────────────────────────────
-  router.post('/parties', customerAuth, tenantLimiter, (req, res) => {
+  router.post('/parties', customerAuth, tenantLimiter, dailyCap, pkgGate, (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const route = STATE_ROUTE_PREFIX + '/parties';
@@ -199,7 +204,7 @@ function makeStateRouter({ customerAuth, tenantLimiter }) {
   });
 
   // ─── Write: parties.remove ─────────────────────────────────────
-  router.post('/parties/remove', customerAuth, tenantLimiter, (req, res) => {
+  router.post('/parties/remove', customerAuth, tenantLimiter, dailyCap, pkgGate, (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const route = STATE_ROUTE_PREFIX + '/parties/remove';

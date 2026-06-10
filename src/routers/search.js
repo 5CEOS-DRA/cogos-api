@@ -82,13 +82,17 @@ function newRequestId() {
   return 'srch_' + crypto.randomBytes(16).toString('base64url');
 }
 
-function makeSearchRouter({ customerAuth, tenantLimiter, _searchClient }) {
+function makeSearchRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage, _searchClient }) {
   const router = express.Router();
   // Test-injectable client. Production uses the real searchClient
   // imported above; tests pass `_searchClient` with a stub fetch.
   const client = _searchClient || searchClient;
+  // Quota gate: search hits the same daily-cap + monthly budget. Optional
+  // params let tests build the router without middleware.
+  const dailyCap = enforceDailyCap || ((req, _res, next) => next());
+  const pkgGate  = enforcePackage  || ((req, _res, next) => next());
 
-  router.post('/', customerAuth, tenantLimiter, async (req, res) => {
+  router.post('/', customerAuth, tenantLimiter, dailyCap, pkgGate, async (req, res) => {
     const t0 = Date.now();
     const request_id = newRequestId();
     const rawBody = req.body || {};

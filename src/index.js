@@ -981,7 +981,7 @@ function createApp() {
   // (no platform tenant required). v0.1 ships iolta-reconcile only; the
   // public catalog page at #/cogos/processes on the platform lists what's
   // available and what's on the roadmap.
-  app.use('/v1/process', makeProcessRouter({ customerAuth, tenantLimiter }));
+  app.use('/v1/process', makeProcessRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }));
 
   // ---- /v1/search · receipt-bearing live-web search ----
   // Sovereign LLM reaches the open internet on demand for facts the
@@ -990,7 +990,7 @@ function createApp() {
   // so customers can replay months later and prove which sources the
   // substrate consulted. provider:'none' when BRAVE_SEARCH_API_KEY is
   // unset (fail-soft, still receipt-bearing).
-  app.use('/v1/search', makeSearchRouter({ customerAuth, tenantLimiter }));
+  app.use('/v1/search', makeSearchRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }));
 
   // ---- /v1/chat-grounded · search-augmented LLM with unified receipt ----
   // Single endpoint that orchestrates /v1/search + sovereign LLM on the
@@ -999,18 +999,18 @@ function createApp() {
   // answer to its citations as one indivisible artifact. ONE usage row
   // per call regardless of internal sub-operations; evidence_chain in the
   // receipt carries sub-operation trace IDs for re-derivation.
-  app.use('/v1/chat-grounded', makeChatGroundedRouter({ customerAuth, tenantLimiter }));
+  app.use('/v1/chat-grounded', makeChatGroundedRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }));
 
   // ---- /v1/compose · multi-step deterministic workflow surface ----
   // Linear-sequence composition of registered processes with end-to-end
   // chain hashing. One usage row per composition (not per step).
-  app.use('/v1/compose', makeComposeRouter({ customerAuth, tenantLimiter }));
+  app.use('/v1/compose', makeComposeRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }));
 
   // ---- /v1/state · per-key stateful substrate ----
   // Journal-in your firm graph once, then run every conflict check
   // against stored, hash-chained, audit-grade state. One usage row per
   // write; reads are free.
-  app.use('/v1/state', makeStateRouter({ customerAuth, tenantLimiter }));
+  app.use('/v1/state', makeStateRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }));
 
   // ---- /admin/* operator surface (X-Admin-Key gated) ----
   // Keys CRUD + quarantine, packages CRUD, usage log, SOC 2 evidence,

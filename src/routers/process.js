@@ -64,8 +64,13 @@ function newRequestId() {
   return 'proc_' + crypto.randomBytes(16).toString('base64url');
 }
 
-function makeProcessRouter({ customerAuth, tenantLimiter }) {
+function makeProcessRouter({ customerAuth, tenantLimiter, enforceDailyCap, enforcePackage }) {
   const router = express.Router();
+  // Quota gate: process invocations are billable substrate work and must
+  // count against the same package quota as /v1/chat. Optional params let
+  // tests build a router without middleware.
+  const dailyCap = enforceDailyCap || ((req, _res, next) => next());
+  const pkgGate  = enforcePackage  || ((req, _res, next) => next());
 
   // ─── Shared per-process invocation handler ───────────────────────
   // Both /iolta-reconcile and /5law-conflict-check share the same
@@ -164,7 +169,7 @@ function makeProcessRouter({ customerAuth, tenantLimiter }) {
   // picks it up via Object.values(REGISTRY).
   for (const p of Object.values(REGISTRY)) {
     const slug = p.id;
-    router.post('/' + slug, customerAuth, tenantLimiter, invokeProcess({
+    router.post('/' + slug, customerAuth, tenantLimiter, dailyCap, pkgGate, invokeProcess({
       route: '/v1/process/' + slug,
       modelId: p.model_id,
       engine: p.engine,

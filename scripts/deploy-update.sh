@@ -83,36 +83,69 @@ if [ -z "${COSIGN_PASSWORD+set}" ] && [ -n "${COSIGN_KEY_FILE:-}" ]; then
     echo "[deploy] auto-fetched COSIGN_PASSWORD from Key Vault"
   fi
 fi
-if [ -n "${COSIGN_KEY_FILE:-}" ] && [ -f "${COSIGN_KEY_FILE}" ]; then
-  if command -v cosign &>/dev/null; then
-    # Capture sign output + exit code so we can detect silent failures.
-    # Previous version swallowed the error and printed a one-line WARN;
-    # several deploys shipped unsigned because of stale shell env (a
-    # COSIGN_PASSWORD set to the wrong value from a prior command).
-    if COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" 2>&1 | tail -3; then
-      # Verify-after-sign: prove the signature is actually published in
-      # ACR before continuing. If the sign output looked fine but ACR
-      # rejected the upload, this catches it.
-      if cosign verify --key "${COSIGN_KEY_FILE%.key}.pub" "${NEW_IMAGE}" >/dev/null 2>&1 \
-         || cosign verify --key "https://cogos.5ceos.com/cosign.pub" "${NEW_IMAGE}" >/dev/null 2>&1; then
-        echo "[deploy] ✓ cosign signature verified on ${NEW_IMAGE}"
-      else
-        echo "[deploy] WARN: cosign sign appeared to succeed but verify FAILED — image will deploy UNSIGNED"
-        echo "[deploy]       Run manually after deploy completes:"
-        echo "[deploy]         COSIGN_PASSWORD=\"\" cosign sign --yes --key \"${COSIGN_KEY_FILE}\" \"${NEW_IMAGE}\""
-      fi
-    else
-      echo "[deploy] WARN: cosign sign exited non-zero — image will deploy UNSIGNED"
-      echo "[deploy]       Likely cause: stale COSIGN_PASSWORD in shell env. Try:"
-      echo "[deploy]         unset COSIGN_PASSWORD && bash scripts/deploy-update.sh"
-    fi
-  else
-    echo "[deploy] WARN: cosign not installed locally — skipping sign step. brew install cosign"
+# FAIL-CLOSED COSIGN POLICY (2026-06-10):
+#
+# The public-facing CogOSHero "Cosign-verified supply chain" guarantee sits
+# under a header that literally says "Every guarantee is machine-checkable."
+# So the deploy MUST refuse to ship an unsigned image unless an operator
+# explicitly opts out for this one deploy.
+#
+# Four failure paths that previously warn-and-continued:
+#   (a) sign succeeded · verify FAILED      (line 100 in the old script)
+#   (b) sign EXITED NON-ZERO                (line 105)
+#   (c) cosign binary not installed         (line 110)
+#   (d) COSIGN_KEY_FILE unset                (line 113)
+# Each now exits 1 instead.
+#
+# Operator override: set ALLOW_UNSIGNED_DEPLOY=1 in env to bypass this
+# guard for one run. Logged loudly so the deploy can't pretend it was
+# signed. Intended for: cosign tooling regressions, KV outage, the rare
+# emergency rollback during a cosign incident. NOT for routine use.
+ALLOW_UNSIGNED="${ALLOW_UNSIGNED_DEPLOY:-0}"
+deploy_fail_closed() {
+  local reason="$1"
+  local hint="$2"
+  if [ "${ALLOW_UNSIGNED}" = "1" ]; then
+    echo "[deploy] ⚠ COSIGN FAIL but ALLOW_UNSIGNED_DEPLOY=1 — proceeding UNSIGNED"
+    echo "[deploy]   reason: ${reason}"
+    echo "[deploy]   The page-stated 'Cosign-verified supply chain' guarantee does NOT hold for this image."
+    echo "[deploy]   Re-sign manually post-deploy and re-verify before ANY customer-facing claim about this revision."
+    return 0
   fi
-else
-  echo "[deploy] WARN: COSIGN_KEY_FILE unset — image NOT signed."
-  echo "[deploy]       Run once to set up: cosign generate-key-pair && export COSIGN_KEY_FILE=\$PWD/cosign.key"
+  echo "[deploy] ✗ COSIGN FAIL-CLOSED: ${reason}"
+  echo "[deploy]   Deploy aborted. Image NOT signed; refusing to ship under a 'Cosign-verified' claim."
+  echo "[deploy]   ${hint}"
+  echo "[deploy]   Emergency override (logs the violation): ALLOW_UNSIGNED_DEPLOY=1 bash scripts/deploy-update.sh"
+  exit 1
+}
+
+if [ -z "${COSIGN_KEY_FILE:-}" ] || [ ! -f "${COSIGN_KEY_FILE}" ]; then
+  deploy_fail_closed \
+    "COSIGN_KEY_FILE unset or missing" \
+    "Run once: cosign generate-key-pair && export COSIGN_KEY_FILE=\$PWD/cosign.key"
 fi
+if ! command -v cosign &>/dev/null; then
+  deploy_fail_closed \
+    "cosign binary not installed on this machine" \
+    "Install: brew install cosign"
+fi
+# Capture sign output + exit code. Stale COSIGN_PASSWORD in shell env is
+# the most common cause of silent sign failures.
+if ! COSIGN_PASSWORD="${COSIGN_PASSWORD:-}" cosign sign --yes --key "${COSIGN_KEY_FILE}" "${NEW_IMAGE}" 2>&1 | tail -3; then
+  deploy_fail_closed \
+    "cosign sign exited non-zero on ${NEW_IMAGE}" \
+    "Likely stale COSIGN_PASSWORD in shell env. Try: unset COSIGN_PASSWORD && bash scripts/deploy-update.sh"
+fi
+# Verify-after-sign: prove the signature is actually published in ACR
+# before continuing. If sign output looked fine but ACR rejected the
+# upload, this catches it.
+if ! ( cosign verify --key "${COSIGN_KEY_FILE%.key}.pub" "${NEW_IMAGE}" >/dev/null 2>&1 \
+       || cosign verify --key "https://cogos.5ceos.com/cosign.pub" "${NEW_IMAGE}" >/dev/null 2>&1 ); then
+  deploy_fail_closed \
+    "cosign sign appeared to succeed but verify FAILED on ${NEW_IMAGE}" \
+    "Re-sign: COSIGN_PASSWORD=\"\" cosign sign --yes --key \"${COSIGN_KEY_FILE}\" \"${NEW_IMAGE}\""
+fi
+echo "[deploy] ✓ cosign signature verified on ${NEW_IMAGE}"
 
 echo ""
 echo "[deploy] [2/3] az containerapp update (revision roll, ~30s)..."

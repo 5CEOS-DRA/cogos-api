@@ -167,6 +167,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pinned Python · pure',
+    // DCI axis enrichment · PROCESS_DETERMINISM §8 pinned-script Python,
+    // stdlib only (PD-HN-8) → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => intFactorMod.intFactor(body),
   },
 
@@ -184,6 +188,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS combinatorial',
+    // DCI axis enrichment · PROCESS_DETERMINISM §8.8 pure-JS BFS,
+    // deterministic by construction (no subprocess, no RNG, no clock).
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => graphReachMod.basicGraphReachability(body),
   },
 
@@ -199,6 +207,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · path-jailed loader',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.2 path-jailed loader,
+    // pure JS file-system read → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcLoadMod.arcLoadTask(body),
   },
 
@@ -214,6 +226,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · v0.1 trivial solver',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.3 trivial
+    // deterministic transformation (identity, constant_fill) → deterministic.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcSolverMod.arcBasicSolver(body),
   },
 
@@ -231,6 +247,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · ARC graph solver',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.8 4-connected-component
+    // segmentation + simple transforms, pure JS, no DSL search → deterministic.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcGraphSolverMod.arcGraphSolver(body),
   },
 
@@ -248,6 +268,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · ARC hybrid solver',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.9 segmentation-informed
+    // solver, "no LLM, no ensemble" per docstring → deterministic.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcHybridSolverMod.arcHybridSolver(body),
   },
 
@@ -266,6 +290,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · ARC sweep evaluator',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.7 multi-task batch
+    // evaluator, byte-deterministic on canonicalized input → deterministic.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcSweepMod.arcSweep(body),
   },
 
@@ -281,6 +309,10 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure JS · ARC evaluator',
+    // DCI axis enrichment · PROCESS_DETERMINISM §10.4 cell-wise grid
+    // comparison, pure JS → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => arcEvalMod.arcEvaluate(body),
   },
 

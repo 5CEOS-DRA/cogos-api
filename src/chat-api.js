@@ -604,6 +604,176 @@ function checkFrontierBudget() {
 function _invalidateBudgetCache() { _budgetCache = { ts: 0, spentToday: 0, capUsd: null }; }
 module.exports._invalidateBudgetCache = _invalidateBudgetCache;
 
+// ─── G: Streaming handler for /v1/chat/completions ──────────────────
+// SSE protocol; OpenAI-compatible delta chunks. Ollama streams JSON-lines
+// at /api/chat?stream=true; we translate each line into an OpenAI delta
+// frame. Final `data: [DONE]` terminator + usage row record at end.
+//
+// On sovereign failure mid-stream, send an `event: error` SSE message
+// (not a chunk) and close. Per the G design call, no frontier escalation
+// for streamed requests — escalation requires the full request/response
+// pair and streaming makes that semantically muddled.
+async function handleChatCompletionsStream({ req, res, body, messages, model, schema, requestId }) {
+  // SSE headers. flushHeaders so the client receives them before any
+  // data; some proxies otherwise hold the response until the first chunk.
+  res.set('Content-Type', 'text/event-stream');
+  res.set('Cache-Control', 'no-cache, no-transform');
+  res.set('Connection', 'keep-alive');
+  res.set('X-Cogos-Request-Id', requestId);
+  res.set('X-Cogos-Model', model);
+  res.set('X-Cogos-Schema-Enforced', schema ? '1' : '0');
+  // Explicit honesty: no per-response signature on streams.
+  res.set('X-Cogos-Stream-Receipt', 'audit-chain-only');
+  if (typeof res.flushHeaders === 'function') res.flushHeaders();
+
+  const start = Date.now();
+  const created = Math.floor(Date.now() / 1000);
+
+  // Send one OpenAI-shape SSE chunk. delta carries content increments;
+  // finish_reason fires on the terminal chunk.
+  function sendChunk({ content, finish_reason, tool_calls }) {
+    const delta = {};
+    if (content !== undefined) delta.content = content;
+    if (tool_calls !== undefined) delta.tool_calls = tool_calls;
+    const chunk = {
+      id: requestId,
+      object: 'chat.completion.chunk',
+      created,
+      model,
+      choices: [{ index: 0, delta, finish_reason: finish_reason || null }],
+    };
+    res.write('data: ' + JSON.stringify(chunk) + '\n\n');
+  }
+
+  function sendError(message, type) {
+    res.write('event: error\n');
+    res.write('data: ' + JSON.stringify({ error: { message, type: type || 'upstream_error' } }) + '\n\n');
+  }
+
+  // First chunk per OpenAI convention sends the role on the delta.
+  // Subsequent chunks omit role and just carry content increments.
+  res.write('data: ' + JSON.stringify({
+    id: requestId, object: 'chat.completion.chunk', created, model,
+    choices: [{ index: 0, delta: { role: 'assistant' }, finish_reason: null }],
+  }) + '\n\n');
+
+  let prompt_tokens = 0;
+  let completion_tokens = 0;
+  let finish_reason = 'stop';
+  let accumulated = '';
+  let streamFailed = false;
+
+  try {
+    // Call Ollama with stream:true. Ollama streams JSON lines (NDJSON);
+    // each line is a partial message. We surface message.content as
+    // delta.content frames as they arrive.
+    const upstreamUrl = UPSTREAM_URL();
+    const payload = {
+      model,
+      messages: messages.map((m) => {
+        const out = { role: m.role, content: m.content || '' };
+        if (m.tool_calls) out.tool_calls = m.tool_calls;
+        if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+        if (m.name) out.name = m.name;
+        return out;
+      }),
+      stream: true,
+      options: {
+        temperature: typeof body.temperature === 'number' ? body.temperature : 0,
+        num_predict: typeof body.max_tokens === 'number' ? body.max_tokens : -1,
+        seed: typeof body.seed === 'number' ? body.seed : undefined,
+      },
+    };
+    if (schema) payload.format = schema;
+    if (Array.isArray(body.tools) && body.tools.length > 0) payload.tools = body.tools;
+
+    const upstream = await axios.post(`${upstreamUrl}/api/chat`, payload, {
+      timeout: TIMEOUT(),
+      responseType: 'stream',
+      validateStatus: () => true,
+    });
+
+    if (upstream.status < 200 || upstream.status >= 300) {
+      sendError(`Upstream ${upstream.status}`, 'upstream_error');
+      res.write('data: [DONE]\n\n');
+      res.end();
+      streamFailed = true;
+    } else {
+      // Ollama emits NDJSON over the stream — one JSON object per line.
+      // Buffer partial chunks across boundaries.
+      let buf = '';
+      await new Promise((resolve, reject) => {
+        upstream.data.on('data', (bytes) => {
+          buf += bytes.toString('utf8');
+          let nl;
+          while ((nl = buf.indexOf('\n')) !== -1) {
+            const line = buf.slice(0, nl).trim();
+            buf = buf.slice(nl + 1);
+            if (!line) continue;
+            try {
+              const obj = JSON.parse(line);
+              const msg = obj.message || {};
+              if (msg.content) {
+                accumulated += msg.content;
+                sendChunk({ content: msg.content });
+              }
+              if (msg.tool_calls) {
+                sendChunk({ tool_calls: msg.tool_calls });
+              }
+              if (obj.done) {
+                prompt_tokens = obj.prompt_eval_count || 0;
+                completion_tokens = obj.eval_count || 0;
+                finish_reason = obj.done_reason || 'stop';
+              }
+            } catch (_parseErr) {
+              // Skip malformed lines silently — Ollama can emit a
+              // half-line at the very end. The next 'end' settles the
+              // promise normally.
+            }
+          }
+        });
+        upstream.data.on('end', resolve);
+        upstream.data.on('error', reject);
+      });
+      // Terminal frame with finish_reason; then [DONE] sentinel.
+      sendChunk({ finish_reason });
+      res.write('data: [DONE]\n\n');
+      res.end();
+    }
+  } catch (e) {
+    logger.error('stream_upstream_failed', { error: e.message, request_id: requestId });
+    if (!res.headersSent) res.status(502);
+    sendError('Stream upstream failed: ' + e.message, 'upstream_error');
+    res.write('data: [DONE]\n\n');
+    res.end();
+    streamFailed = true;
+  }
+
+  // Record usage AFTER the stream closes. Status reflects success vs
+  // stream-failure so audit consumers can distinguish.
+  const latencyMs = Date.now() - start;
+  try {
+    usage.record({
+      key_id: req.apiKey && req.apiKey.id,
+      tenant_id: req.apiKey && req.apiKey.tenant_id,
+      app_id: req.apiKey && req.apiKey.app_id,
+      model,
+      prompt_tokens,
+      completion_tokens,
+      latency_ms: latencyMs,
+      status: streamFailed ? 'stream_failed' : 'success',
+      schema_enforced: Boolean(schema),
+      request_id: requestId,
+      prompt_fingerprint: promptFingerprint(messages),
+      schema_name: schemaName(body.response_format),
+      x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+      streamed: true,
+    });
+  } catch (recordErr) {
+    logger.warn('stream_usage_record_failed', { error: recordErr.message });
+  }
+}
+
 async function handleChatCompletions(req, res) {
   const body = req.body || {};
   const messages = body.messages;
@@ -616,6 +786,21 @@ async function handleChatCompletions(req, res) {
   const model = resolveModel(body.model);
   const schema = extractSchema(body.response_format);
   const requestId = 'chatcmpl-' + crypto.randomBytes(12).toString('hex');
+
+  // ─── G: Streaming branch ──────────────────────────────────────────
+  // body.stream === true → Server-Sent Events with OpenAI-compatible
+  // delta chunks. IMPORTANT: streamed responses do NOT carry the per-
+  // response HMAC + ed25519 attestation that buffered responses do
+  // (signing a stream requires accumulating it first, which defeats
+  // the streaming UX). Callers who need a cryptographic receipt for a
+  // streamed call should pull /v1/audit or /v1/audit/chain-head after
+  // the stream completes — the usage row IS recorded.
+  // Frontier escalation is also not supported on streamed calls:
+  // mid-stream sovereign failure terminates the stream with an error
+  // SSE event rather than silently retrying.
+  if (body.stream === true) {
+    return handleChatCompletionsStream({ req, res, body, messages, model, schema, requestId });
+  }
 
   const start = Date.now();
   let upstream;

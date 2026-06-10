@@ -61,6 +61,9 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure rule engine',
+    // DCI axis enrichment · pure rule engine → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     engine: (body) => {
       const result = reconciler.reconcileThreeWay(body);
       return { ...result, reconciler_version: reconciler.RECONCILER_VERSION };
@@ -77,6 +80,9 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure rule engine',
+    // DCI axis enrichment · pure rule engine → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     rule_ids: conflictEngine.RULE_IDS,
     // wrapBody · optional pre-engine injection from per-key state.
     // When body.use_stored_state is true, pull firm_matters +
@@ -118,6 +124,9 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure rule engine',
+    // DCI axis enrichment · pure regex engine → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     rule_ids: ['ma_w2_ip_exposure', 'ma_w2_data_residency', 'ma_w2_regulatory_exposure', 'ma_w2_litigation'],
     engine: (body) => {
       // Accept either { finding: {...} } or { findings: [...] }.
@@ -285,6 +294,9 @@ const REGISTRY = {
     pricing_tier: 1,
     pricing_usd:  0.05,
     pricing_label: 'Tier 1 · pure rule engine',
+    // DCI axis enrichment · pure rule engine → deterministic + sovereign.
+    lane_support:    ['deterministic'],
+    vendor_required: false,
     rule_ids: primitive8.RULE_KEYS,
     engine: (body) => {
       // Per COGOS_PROCESS_DETERMINISM_DOCTRINE_v0.1 PD-I2 + PD-HN-1:

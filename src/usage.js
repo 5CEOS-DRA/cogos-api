@@ -296,6 +296,12 @@ function record({
   was_escalated = false,
   frontier_provider = null,
   escalation_reason = null,
+  // Sovereign retry telemetry. Number of attempts against the sovereign
+  // upstream BEFORE either success or escalation. Persisted on the row
+  // but DELIBERATELY NOT IN THE CANONICAL CHAIN PAYLOAD — adding it
+  // would invalidate every existing row_hash on disk. Metadata about
+  // HOW the call was served does not affect WHAT was served.
+  sovereign_attempts = null,
 }) {
   ensureFile();
   const ts = new Date().toISOString();
@@ -410,6 +416,12 @@ function record({
     row.was_escalated = true;
     row.frontier_provider = frontier_provider || null;
     row.escalation_reason = escalation_reason || null;
+  }
+  // Sovereign retry telemetry: attach only when caller passed a value.
+  // Existing rows in the wild have no `sovereign_attempts` — that's fine,
+  // they map to "unknown" downstream. NOT included in the chain payload.
+  if (sovereign_attempts != null) {
+    row.sovereign_attempts = sovereign_attempts;
   }
   fs.appendFileSync(USAGE_FILE, JSON.stringify(row) + '\n');
   // Keep the in-memory head cache hot so findHead() stays O(1) for

@@ -811,36 +811,74 @@ async function handleChatCompletions(req, res) {
   const manualEscalateHeader = (req.headers['x-cogos-escalate'] || '').toString().toLowerCase();
   const manualEscalate = manualEscalateHeader === '1' || manualEscalateHeader === 'true';
 
-  try {
-    upstream = await callUpstream({
-      url: UPSTREAM_URL(),
-      key: UPSTREAM_API_KEY(),
-      model,
-      messages,
-      schema,
-      temperature: typeof body.temperature === 'number' ? body.temperature : 0,
-      max_tokens: body.max_tokens,
-      seed: body.seed,
-      tools: body.tools,
-      tool_choice: body.tool_choice,
-    });
-    if (manualEscalate) escalationReason = 'manual_override';
-  } catch (e) {
-    escalationReason = 'sovereign_error';
-    logger.error('upstream_request_failed', {
-      provider: UPSTREAM_PROVIDER(),
-      error: e.message,
-      latency: Date.now() - start,
-    });
-    upstream = null;
-  }
-  if (upstream && !upstream.parsed) {
-    escalationReason = 'sovereign_error';
-    logger.warn('upstream_non_2xx', {
-      provider: UPSTREAM_PROVIDER(),
-      status: upstream.status,
-      body: upstream.data,
-    });
+  // Sovereign retry policy — drives down the frontier-escalation rate by
+  // absorbing transient upstream blips (network DNS hiccup, momentary 5xx,
+  // brief Ollama unavailability) before deciding to escalate. Verified on
+  // 2026-06-08 incident replay: 20 of 21 historical sovereign_error rows
+  // came from a single 30-second tenant window — retry would have caught
+  // any that recovered within the backoff. Manual_override bypasses retry
+  // (caller explicitly wants frontier on this call).
+  //   SOVEREIGN_MAX_RETRIES         — retries AFTER first attempt (default 1)
+  //   SOVEREIGN_RETRY_BACKOFF_MS    — sleep between attempts (default 100)
+  // NOTE: explicit undefined/empty check — `0 || 1` would collapse a
+  // legitimately operator-set SOVEREIGN_MAX_RETRIES=0 to the default 1.
+  const _retriesRaw = process.env.SOVEREIGN_MAX_RETRIES;
+  const SOVEREIGN_MAX_RETRIES = (_retriesRaw === undefined || _retriesRaw === '')
+    ? 1
+    : Math.max(0, Number(_retriesRaw) || 0);
+  const _backoffRaw = process.env.SOVEREIGN_RETRY_BACKOFF_MS;
+  const SOVEREIGN_RETRY_BACKOFF_MS = (_backoffRaw === undefined || _backoffRaw === '')
+    ? 100
+    : Math.max(0, Number(_backoffRaw) || 0);
+
+  let sovereignAttempts = 0;
+  let lastSovereignError = null;
+  for (let attempt = 0; attempt <= SOVEREIGN_MAX_RETRIES; attempt++) {
+    if (attempt > 0 && SOVEREIGN_RETRY_BACKOFF_MS > 0) {
+      await new Promise((r) => setTimeout(r, SOVEREIGN_RETRY_BACKOFF_MS));
+    }
+    sovereignAttempts++;
+    try {
+      upstream = await callUpstream({
+        url: UPSTREAM_URL(),
+        key: UPSTREAM_API_KEY(),
+        model,
+        messages,
+        schema,
+        temperature: typeof body.temperature === 'number' ? body.temperature : 0,
+        max_tokens: body.max_tokens,
+        seed: body.seed,
+        tools: body.tools,
+        tool_choice: body.tool_choice,
+      });
+      if (upstream && upstream.parsed) {
+        // Sovereign succeeded — clear any prior error state from earlier
+        // attempts and fall through. manualEscalate still applies if set.
+        lastSovereignError = null;
+        if (manualEscalate) escalationReason = 'manual_override';
+        break;
+      }
+      // Non-2xx — capture for retry consideration.
+      lastSovereignError = { kind: 'non_2xx', status: upstream && upstream.status };
+      upstream = null;
+    } catch (e) {
+      lastSovereignError = { kind: 'throw', error: e.message };
+      upstream = null;
+    }
+    // Last attempt failed and no more retries → set escalation reason.
+    if (attempt === SOVEREIGN_MAX_RETRIES) {
+      escalationReason = 'sovereign_error';
+      logger.warn('sovereign_exhausted_retries', {
+        provider: UPSTREAM_PROVIDER(),
+        attempts: sovereignAttempts,
+        last_error: lastSovereignError,
+      });
+    } else {
+      logger.info('sovereign_retry_pending', {
+        attempt: sovereignAttempts,
+        last_error: lastSovereignError,
+      });
+    }
   }
 
   // ─── Substrate-automatic frontier escalation (CL-NEVER-1 rev 2026-06-06) ───
@@ -876,6 +914,7 @@ async function handleChatCompletions(req, res) {
         prompt_fingerprint: promptFingerprint(messages),
         schema_name: schemaName(body.response_format),
         x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+        sovereign_attempts: sovereignAttempts,
       });
       res.set('X-Cogos-Budget-Cap-Reached', '1');
       res.set('X-Cogos-Daily-Spend-Usd', budget.spentToday.toFixed(6));
@@ -926,6 +965,7 @@ async function handleChatCompletions(req, res) {
         was_escalated: true,
         frontier_provider: FRONTIER_PROVIDER_NAME(),
         escalation_reason: escalationReason,
+        sovereign_attempts: sovereignAttempts,
       });
       const frontierLatencyMs = Date.now() - frontierStart;
       logger.info('frontier_escalation_success', {
@@ -996,6 +1036,7 @@ async function handleChatCompletions(req, res) {
       was_escalated: true,
       frontier_provider: FRONTIER_PROVIDER_NAME(),
       escalation_reason: escalationReason,
+      sovereign_attempts: sovereignAttempts,
     });
     return res.status(502).json({
       error: {
@@ -1027,6 +1068,7 @@ async function handleChatCompletions(req, res) {
       // content fields. Bearer-only customers don't have one and the
       // row stays cleartext (sealed:false) — explicit, not silent.
       x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+      sovereign_attempts: sovereignAttempts,
     });
     return res.status(502).json({
       error: { message: 'Upstream inference engine unreachable', type: 'upstream_error' },
@@ -1047,6 +1089,7 @@ async function handleChatCompletions(req, res) {
       prompt_fingerprint: promptFingerprint(messages),
       schema_name: schemaName(body.response_format),
       x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+      sovereign_attempts: sovereignAttempts,
     });
     return res.status(502).json({
       error: {
@@ -1077,6 +1120,7 @@ async function handleChatCompletions(req, res) {
     prompt_fingerprint: promptFingerprint(messages),
     schema_name: schemaName(body.response_format),
     x25519_pubkey_pem: req.apiKey && req.apiKey.x25519_pubkey_pem,
+    sovereign_attempts: sovereignAttempts,
   });
 
   // Operator awareness: fire a one-shot notification on first successful

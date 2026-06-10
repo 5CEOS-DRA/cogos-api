@@ -354,10 +354,18 @@ function schemaName(responseFormat) {
   return js.name;
 }
 
-async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed, timeoutMs }) {
+async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed, timeoutMs, tools, tool_choice }) {
+  // Preserve role + content; tool_calls / tool_call_id ride on assistant +
+  // tool-role messages respectively and Ollama 0.4+ accepts them verbatim.
   const payload = {
     model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.map((m) => {
+      const out = { role: m.role, content: m.content || '' };
+      if (m.tool_calls) out.tool_calls = m.tool_calls;
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      if (m.name) out.name = m.name;
+      return out;
+    }),
     stream: false,
     options: {
       temperature,
@@ -366,6 +374,12 @@ async function callOllama({ url, model, messages, schema, temperature, max_token
     },
   };
   if (schema) payload.format = schema;
+  // Ollama 0.4+ accepts the OpenAI-shape `tools` array. tool_choice is
+  // an OpenAI-only concept (Ollama selects implicitly); we forward it
+  // anyway since the upstream silently ignores unknown fields and the
+  // forwarding is harmless.
+  if (Array.isArray(tools) && tools.length > 0) payload.tools = tools;
+  if (tool_choice !== undefined) payload.tool_choice = tool_choice;
   const res = await axios.post(`${url}/api/chat`, payload, {
     timeout: typeof timeoutMs === 'number' ? timeoutMs : TIMEOUT(),
     validateStatus: () => true,
@@ -374,6 +388,9 @@ async function callOllama({ url, model, messages, schema, temperature, max_token
     res.status >= 200 && res.status < 300
       ? {
           content: (res.data && res.data.message && res.data.message.content) || '',
+          // Surface tool_calls in canonical OpenAI shape so downstream
+          // code (SDK + handler) doesn't have to branch on upstream.
+          tool_calls: (res.data && res.data.message && res.data.message.tool_calls) || undefined,
           prompt_tokens: (res.data && res.data.prompt_eval_count) || 0,
           completion_tokens: (res.data && res.data.eval_count) || 0,
           finish_reason: (res.data && res.data.done_reason) || 'stop',
@@ -382,10 +399,16 @@ async function callOllama({ url, model, messages, schema, temperature, max_token
   return { status: res.status, data: res.data, parsed };
 }
 
-async function callOpenAI({ url, key, model, messages, schema, temperature, max_tokens, seed, timeoutMs }) {
+async function callOpenAI({ url, key, model, messages, schema, temperature, max_tokens, seed, timeoutMs, tools, tool_choice }) {
   const payload = {
     model,
-    messages: messages.map((m) => ({ role: m.role, content: m.content })),
+    messages: messages.map((m) => {
+      const out = { role: m.role, content: m.content || '' };
+      if (m.tool_calls) out.tool_calls = m.tool_calls;
+      if (m.tool_call_id) out.tool_call_id = m.tool_call_id;
+      if (m.name) out.name = m.name;
+      return out;
+    }),
     temperature,
     stream: false,
   };
@@ -397,6 +420,8 @@ async function callOpenAI({ url, key, model, messages, schema, temperature, max_
       json_schema: { name: 'cogos_output', strict: true, schema },
     };
   }
+  if (Array.isArray(tools) && tools.length > 0) payload.tools = tools;
+  if (tool_choice !== undefined) payload.tool_choice = tool_choice;
   const headers = { 'Content-Type': 'application/json' };
   if (key) headers['Authorization'] = `Bearer ${key}`;
   const fullUrl = /\/chat\/completions$/.test(url)
@@ -412,6 +437,7 @@ async function callOpenAI({ url, key, model, messages, schema, temperature, max_
     res.status >= 200 && res.status < 300
       ? {
           content: (choice && choice.message && choice.message.content) || '',
+          tool_calls: (choice && choice.message && choice.message.tool_calls) || undefined,
           prompt_tokens: (res.data && res.data.usage && res.data.usage.prompt_tokens) || 0,
           completion_tokens: (res.data && res.data.usage && res.data.usage.completion_tokens) || 0,
           finish_reason: (choice && choice.finish_reason) || 'stop',
@@ -464,7 +490,7 @@ const ALLOWED_ESCALATION_REASONS = new Set([
   'low_confidence', 'schema_invalid', 'manual_override',
 ]);
 
-async function callFrontier({ messages, schema, temperature, max_tokens, seed }) {
+async function callFrontier({ messages, schema, temperature, max_tokens, seed, tools, tool_choice }) {
   const baseUrl = FRONTIER_API_BASE_URL();
   const key = FRONTIER_API_KEY_VAL();
   if (!baseUrl || !key) {
@@ -481,6 +507,7 @@ async function callFrontier({ messages, schema, temperature, max_tokens, seed })
       key,
       model: FRONTIER_MODEL_NAME(),
       messages, schema, temperature, max_tokens, seed,
+      tools, tool_choice,
       timeoutMs: FRONTIER_TIMEOUT(),
     });
     return res.parsed
@@ -609,6 +636,8 @@ async function handleChatCompletions(req, res) {
       temperature: typeof body.temperature === 'number' ? body.temperature : 0,
       max_tokens: body.max_tokens,
       seed: body.seed,
+      tools: body.tools,
+      tool_choice: body.tool_choice,
     });
     if (manualEscalate) escalationReason = 'manual_override';
   } catch (e) {
@@ -681,10 +710,12 @@ async function handleChatCompletions(req, res) {
       temperature: typeof body.temperature === 'number' ? body.temperature : 0,
       max_tokens: body.max_tokens,
       seed: body.seed,
+      tools: body.tools,
+      tool_choice: body.tool_choice,
     });
     const totalLatency = Date.now() - start;
     if (frontier.ok) {
-      const { content, prompt_tokens, completion_tokens, finish_reason } = frontier.parsed;
+      const { content, tool_calls, prompt_tokens, completion_tokens, finish_reason } = frontier.parsed;
       res.set('X-Cogos-Model', FRONTIER_MODEL_NAME());
       res.set('X-Cogos-Latency-Ms', String(totalLatency));
       res.set('X-Cogos-Schema-Enforced', schema ? '1' : '0');
@@ -745,7 +776,7 @@ async function handleChatCompletions(req, res) {
         object: 'chat.completion',
         created: Math.floor(Date.now() / 1000),
         model: FRONTIER_MODEL_NAME(),
-        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason }],
+        choices: [{ index: 0, message: tool_calls ? { role: 'assistant', content, tool_calls } : { role: 'assistant', content }, finish_reason }],
         usage: { prompt_tokens, completion_tokens, total_tokens: prompt_tokens + completion_tokens },
         cogos: {
           schema_enforced: Boolean(schema),
@@ -840,7 +871,7 @@ async function handleChatCompletions(req, res) {
     });
   }
 
-  const { content, prompt_tokens, completion_tokens, finish_reason } = upstream.parsed;
+  const { content, tool_calls, prompt_tokens, completion_tokens, finish_reason } = upstream.parsed;
 
   res.set('X-Cogos-Model', model);
   res.set('X-Cogos-Latency-Ms', String(latencyMs));
@@ -917,7 +948,7 @@ async function handleChatCompletions(req, res) {
     choices: [
       {
         index: 0,
-        message: { role: 'assistant', content },
+        message: tool_calls ? { role: 'assistant', content, tool_calls } : { role: 'assistant', content },
         finish_reason,
       },
     ],

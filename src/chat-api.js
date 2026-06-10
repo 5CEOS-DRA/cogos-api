@@ -354,7 +354,7 @@ function schemaName(responseFormat) {
   return js.name;
 }
 
-async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed }) {
+async function callOllama({ url, model, messages, schema, temperature, max_tokens, seed, timeoutMs }) {
   const payload = {
     model,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -367,7 +367,7 @@ async function callOllama({ url, model, messages, schema, temperature, max_token
   };
   if (schema) payload.format = schema;
   const res = await axios.post(`${url}/api/chat`, payload, {
-    timeout: TIMEOUT(),
+    timeout: typeof timeoutMs === 'number' ? timeoutMs : TIMEOUT(),
     validateStatus: () => true,
   });
   const parsed =
@@ -382,7 +382,7 @@ async function callOllama({ url, model, messages, schema, temperature, max_token
   return { status: res.status, data: res.data, parsed };
 }
 
-async function callOpenAI({ url, key, model, messages, schema, temperature, max_tokens, seed }) {
+async function callOpenAI({ url, key, model, messages, schema, temperature, max_tokens, seed, timeoutMs }) {
   const payload = {
     model,
     messages: messages.map((m) => ({ role: m.role, content: m.content })),
@@ -404,7 +404,7 @@ async function callOpenAI({ url, key, model, messages, schema, temperature, max_
     : `${url.replace(/\/$/, '')}/chat/completions`;
   const res = await axios.post(fullUrl, payload, {
     headers,
-    timeout: TIMEOUT(),
+    timeout: typeof timeoutMs === 'number' ? timeoutMs : TIMEOUT(),
     validateStatus: () => true,
   });
   const choice = res.data && res.data.choices && res.data.choices[0];
@@ -470,23 +470,24 @@ async function callFrontier({ messages, schema, temperature, max_tokens, seed })
   if (!baseUrl || !key) {
     return { ok: false, reason: 'frontier_not_configured' };
   }
-  const oldTimeout = process.env.INFERENCE_TIMEOUT_MS;
-  process.env.INFERENCE_TIMEOUT_MS = String(FRONTIER_TIMEOUT());
+  // B2: pass timeout as a parameter rather than mutating process.env
+  // around the await. The old pattern stashed INFERENCE_TIMEOUT_MS,
+  // overwrote it, and restored in finally — under concurrent escalation
+  // two requests could race on the global and corrupt each other's
+  // restored value. callOpenAI now accepts timeoutMs directly.
   try {
     const res = await callOpenAI({
       url: baseUrl,
       key,
       model: FRONTIER_MODEL_NAME(),
       messages, schema, temperature, max_tokens, seed,
+      timeoutMs: FRONTIER_TIMEOUT(),
     });
     return res.parsed
       ? { ok: true, status: res.status, parsed: res.parsed, data: res.data }
       : { ok: false, reason: 'frontier_non_2xx', status: res.status, data: res.data };
   } catch (e) {
     return { ok: false, reason: 'frontier_threw', error: e.message };
-  } finally {
-    if (oldTimeout != null) process.env.INFERENCE_TIMEOUT_MS = oldTimeout;
-    else delete process.env.INFERENCE_TIMEOUT_MS;
   }
 }
 
